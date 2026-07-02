@@ -23,6 +23,42 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+function realAncestor(p) {
+  // 逐层向上找到最近的已存在祖先并 realpath，再把不存在的尾巴拼回，看穿符号链接
+  let cur = path.resolve(p);
+  const tail = [];
+  while (!fs.existsSync(cur)) {
+    tail.unshift(path.basename(cur));
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  const base = fs.existsSync(cur) ? fs.realpathSync(cur) : cur;
+  return tail.length ? path.join(base, ...tail) : base;
+}
+function assertNotSymlink(p) {
+  try {
+    if (fs.lstatSync(p).isSymbolicLink()) {
+      console.error(`拒绝：${p} 是符号链接，绝不跟随写入。`);
+      process.exit(3);
+    }
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e; // 不存在则允许（稍后新建）
+  }
+}
+function safeWrite(filePath, data, mode) {
+  assertNotSymlink(filePath);
+  const tmp = path.join(path.dirname(filePath), `.tmp-${crypto.randomBytes(6).toString("hex")}`);
+  const fd = fs.openSync(tmp, "wx", mode); // O_CREAT|O_EXCL
+  try {
+    fs.writeSync(fd, data);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, filePath);
+  fs.chmodSync(filePath, mode);
+}
+
 function arg(name, def = undefined) {
   const i = process.argv.indexOf(name);
   return i > -1 && i + 1 < process.argv.length ? process.argv[i + 1] : def;
@@ -38,7 +74,7 @@ if (!authDir) {
 }
 
 // —— 安全护栏：绝不写进真实凭证目录 ——
-const resolvedAuth = path.resolve(authDir);
+const resolvedAuth = realAncestor(authDir);
 const realDir = path.resolve(os.homedir(), ".claude-science");
 if (resolvedAuth === realDir) {
   console.error(`拒绝：--auth-dir 指向真实凭证目录 ${realDir}。铁律禁止。`);
@@ -87,7 +123,7 @@ if (fs.existsSync(keyFile) && !force) {
   };
 }
 const keyBlob = KEY_NAMES.map((k) => `${k}=${keys[k]}`).join("\n") + "\n";
-fs.writeFileSync(keyFile, keyBlob, { mode: 0o600 });
+safeWrite(keyFile, keyBlob, 0o600);
 
 // —— 令牌 blob（明文），字段对齐 _adapt / _tryOauthToken ——
 const accountUuid = crypto.randomUUID();
@@ -128,9 +164,14 @@ const encFileBody = encryptTokenV2(JSON.stringify(blob), keys.OAUTH_ENCRYPTION_K
 const tokDir = path.join(resolvedAuth, ".oauth-tokens");
 fs.mkdirSync(tokDir, { recursive: true, mode: 0o700 });
 try { fs.chmodSync(tokDir, 0o700); } catch {}
-for (const f of fs.readdirSync(tokDir)) if (f.endsWith(".enc")) fs.unlinkSync(path.join(tokDir, f));
+for (const f of fs.readdirSync(tokDir)) {
+  if (!f.endsWith(".enc")) continue;
+  const p = path.join(tokDir, f);
+  assertNotSymlink(p);
+  fs.unlinkSync(p);
+}
 const userId = accountUuid.replace(/[^a-zA-Z0-9_-]/g, ""); // 与 YDO 净化一致
-fs.writeFileSync(path.join(tokDir, `${userId}.enc`), encFileBody, { mode: 0o600 });
+safeWrite(path.join(tokDir, `${userId}.enc`), encFileBody, 0o600);
 
 // —— 自校验：用同样的解密逻辑读回来，确保 Science 能解开 ——
 function decryptTokenV2(body, oauthKeyB64) {
@@ -154,10 +195,10 @@ if (roundtrip.email !== email) {
 }
 
 // —— active-org.json（Jb 只要求 org_uuid 是 UUID）——
-fs.writeFileSync(
+safeWrite(
   path.join(resolvedAuth, "active-org.json"),
   JSON.stringify({ org_uuid: orgUuid }, null, 2) + "\n",
-  { mode: 0o600 }
+  0o600
 );
 
 console.log(JSON.stringify({
