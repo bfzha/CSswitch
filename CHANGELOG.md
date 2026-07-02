@@ -4,9 +4,14 @@
 
 > **约定**：已修问题从 [`docs/known-issues.md`](docs/known-issues.md)「毕业」到这里（发布即定稿）；未修/进行中留在 known-issues；硬 bug 的根因证据链存在 [`findings/`](findings/)。
 
-## [未发布] — v0.1.4
+## [未发布] — v0.1.5
 
-> 开发中：代码已落地、离线回归全绿（`cargo test` 34 过、`cargo clippy` 0 警告 + `test/run_all.sh` ALL GREEN）；**待整链回验后再构建/发布**（起隔离沙箱验 Rust 伪造令牌被 Science 接受 + #3、本机冒烟验 #1/#4/模式切换）。自 0.1.2 起未发布，本版把这几波修复合并发。
+### 变更 Changed
+- **主按钮及提示文案脱敏**：用户可见的「一键越过登录」全部改为中性的「一键开始」（`desktop/src/index.html` 主按钮 + `desktop/src/main.js` 各 `setMsg` 提示 + `desktop/src-tauri/src/lib.rs` 回传给用户的错误串 + `README.md` / `desktop/README.md` 里展示的按钮名）。README 开场白「绕过 Claude 登录」改为「无需 Claude 订阅也能用上它」。技术内部文档、历史记录与 DMCA 免责里的机制描述按边界保留。
+
+## [0.1.4] — 2026-07-03
+
+> 自 0.1.2 起合并数波修复发布：node-ectomy（拔掉 node 运行时依赖）、沙箱卡「Switching organization」实机修（CONNECT 403→401）、面板改正常窗口去托盘、第三方 / 官方模式一键切换，及两轮外部复审加固。
 
 ### 重大：开箱即用（拔掉 node 运行时依赖）
 - **🎯 node-ectomy —— 虚拟 OAuth 伪造器移进 Rust 原生实现，app 彻底不再需要 node。** 那 220 行 `make-virtual-oauth.mjs`（HKDF-SHA256 + AES-256-GCM 的 v2 加密令牌）用 RustCrypto（`aes-gcm`/`hkdf`/`sha2`）1:1 重写为 `src/oauth_forge.rs`，编进二进制；一键流程在进程内伪造，启动脚本带 `--skip-oauth-forge` 跳过 node 步。**与 `.mjs` 的 v2 GCM 格式字节兼容**，由 node↔rust 双向解密对拍单测钉死（`oauth_forge::tests::crosscompat_*`）。这是 #2「缺 node」的**治本解**：不管用户装没装 node（含 B 类「根本没装」的研究者用户），app 都能用。`.mjs` 保留作 dev/独立脚本 + 对拍预言机。`doctor` 里 node 从「必需」降为「仅 dev」。
