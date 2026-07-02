@@ -32,7 +32,6 @@ PROVIDERS = {
         "mode": "anthropic",
         "url": "https://api.deepseek.com/anthropic/v1/messages",
         "key_env": "DEEPSEEK_API_KEY",
-        "max_tokens_cap": 8192,
         # 选择器里展示的可选模型。
         # 注意：Science 模型面板对可选项有两道硬规则（二进制 s0/ZjO/XjO/hB_）：
         #   1) id 必须以 claude- 开头（s0）；
@@ -53,13 +52,18 @@ PROVIDERS = {
             "claude-sonnet-4-6": "deepseek-v4-flash",
             "claude-haiku-4-5": "deepseek-v4-flash",
         },
+        # 每模型输出上限。provisional：待 §12.3 拉官方模型列表核对真实上限后校准。
+        "model_caps": {
+            "deepseek-v4-pro": 65536,
+            "deepseek-v4-flash": 32768,
+        },
+        "default_cap": 8192,
         "default_model": "deepseek-v4-flash",
     },
     "qwen": {
         "mode": "openai",
         "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         "key_env": "DASHSCOPE_API_KEY",
-        "max_tokens_cap": 8192,
         "models": [
             ("qwen-max", "Qwen Max"),
             ("qwen-plus", "Qwen Plus"),
@@ -71,6 +75,13 @@ PROVIDERS = {
             "claude-sonnet-4-6": "qwen-plus",
             "claude-haiku-4-5": "qwen-turbo",
         },
+        # provisional：待核对 DashScope 各模型真实上限。
+        "model_caps": {
+            "qwen-max": 8192,
+            "qwen-plus": 8192,
+            "qwen-turbo": 8192,
+        },
+        "default_cap": 8192,
         "default_model": "qwen-plus",
     },
 }
@@ -124,9 +135,12 @@ def resolve_model(name):
     return PROV["default_model"]
 
 
-def clamp_max_tokens(v):
-    cap = PROV.get("max_tokens_cap")
-    if cap and v:
+def clamp_max_tokens(v, model=None):
+    if not v:
+        return v
+    caps = PROV.get("model_caps") or {}
+    cap = caps.get(model, PROV.get("default_cap"))
+    if cap:
         return min(int(v), cap)
     return v
 
@@ -212,7 +226,7 @@ def anthropic_to_openai(req):
             msgs.append({"role": role, "content": "".join(text_parts)})
     out = {"model": resolve_model(req.get("model")), "messages": msgs, "stream": False}
     if req.get("max_tokens"):
-        out["max_tokens"] = clamp_max_tokens(req["max_tokens"])
+        out["max_tokens"] = clamp_max_tokens(req["max_tokens"], out["model"])
     if req.get("temperature") is not None:
         out["temperature"] = req["temperature"]
     if req.get("tools"):
@@ -339,7 +353,7 @@ class H(BaseHTTPRequestHandler):
         body = dict(areq)
         body["model"] = target
         if body.get("max_tokens"):
-            body["max_tokens"] = clamp_max_tokens(body["max_tokens"])
+            body["max_tokens"] = clamp_max_tokens(body["max_tokens"], target)
         # DeepSeek 的 thinking 归一化：
         #  - 强制 tool_choice（any/tool，如标题/verdict 生成）：必须显式关 thinking。
         #    注意 DeepSeek flash 默认 thinking 开，即使请求里 thinking=null 也会与强制工具冲突，故无条件置 disabled。

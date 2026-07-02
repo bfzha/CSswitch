@@ -44,5 +44,27 @@ class ToolChoiceMapping(unittest.TestCase):
         self.assertEqual(out["top_p"], 0.5)
 
 
+class MaxTokensPerModel(unittest.TestCase):
+    def setUp(self):
+        cs.PROV = cs.PROVIDERS["deepseek"]
+
+    def test_cap_uses_target_model_entry(self):
+        self.assertEqual(cs.clamp_max_tokens(100000, "deepseek-v4-pro"), 65536)
+        self.assertEqual(cs.clamp_max_tokens(100000, "deepseek-v4-flash"), 32768)
+
+    def test_unknown_model_uses_default_cap(self):
+        self.assertEqual(cs.clamp_max_tokens(100000, "who-knows"), 8192)
+
+    def test_not_clamped_below_request(self):
+        self.assertEqual(cs.clamp_max_tokens(500, "deepseek-v4-pro"), 500)
+
+    def test_none_passthrough(self):
+        self.assertIsNone(cs.clamp_max_tokens(None, "deepseek-v4-pro"))
+
+    def test_qwen_per_model(self):
+        cs.PROV = cs.PROVIDERS["qwen"]
+        self.assertEqual(cs.clamp_max_tokens(100000, "qwen-max"), 8192)
+
+
 if __name__ == "__main__":
     unittest.main()
