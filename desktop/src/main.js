@@ -88,7 +88,7 @@ function applyMode(m) {
     b.classList.toggle("active", b.dataset.mode === mode)
   );
   els.oneClickBtn.textContent =
-    mode === "official" ? "打开官方 Claude Science ↗" : "⚡ 一键越过登录";
+    mode === "official" ? "打开官方 Claude Science ↗" : "⚡ 一键开始";
 }
 
 // 点分段切换：先落盘（切官方时后端会顺带停第三方链路），成功再翻 UI；失败保持旧模式、如实报错。
@@ -108,7 +108,7 @@ async function switchMode(m) {
   setMsg(
     mode === "official"
       ? "已切到官方模式：第三方代理/沙箱已停，点上方按钮打开你真实的 Claude Science。"
-      : "已切到第三方模式：填 key 后点「一键越过登录」。"
+      : "已切到第三方模式：填 key 后点「一键开始」。"
   );
   await refreshStatus();
 }
@@ -184,9 +184,9 @@ async function saveKey() {
     try {
       const v = await call("verify_key");
       if (v && v.ok) {
-        setMsg("已保存，key 有效 ✓ 代理已就绪，点「一键越过登录」即可。", "ok");
+        setMsg("已保存，key 有效 ✓ 代理已就绪，点「一键开始」即可。", "ok");
       } else {
-        setMsg("已保存，代理已起；但 key 未通过验证：" + ((v && v.hint) || "上游未接受") + " 可仍试「一键越过登录」。", "err");
+        setMsg("已保存，代理已起；但 key 未通过验证：" + ((v && v.hint) || "上游未接受") + " 可仍试「一键开始」。", "err");
       }
     } catch (ve) {
       // 代理没起来（缺依赖/端口占用），或验证请求发不出去（网络/上游不通）。
@@ -216,9 +216,9 @@ async function stopAll() {
 
 async function oneClick() {
   setBusy(true);
-  setMsg("一键越过登录：起代理 → 起沙箱 → 探活…");
+  setMsg("一键开始：起代理 → 起沙箱 → 探活…");
   try {
-    // 「粘贴 key → 直接一键越过登录」也要能走通：输入框里有新 key 就先存下，
+    // 「粘贴 key → 直接一键开始」也要能走通：输入框里有新 key 就先存下，
     // 不强制用户先点「保存」（修 P1：oneClick 之前不读/不存输入框，导致无 key 起代理失败）。
     const key = els.keyInput.value.trim();
     if (key) {
@@ -232,7 +232,7 @@ async function oneClick() {
     setMsg("登录态就绪。正在打开浏览器面板…\n" + (r.url || ""), "ok");
     await refreshStatus();
   } catch (e) {
-    setMsg("一键越登录失败：" + e, "err");
+    setMsg("一键开始失败：" + e, "err");
   } finally {
     setBusy(false);
   }

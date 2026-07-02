@@ -1,6 +1,6 @@
 # CSSwitch 桌面 app（Tauri）
 
-macOS 桌面 app（正常窗口，非菜单栏），把 CSSwitch 的日常操作收进一个面板：第三方 / 官方模式切换、选 provider、填第三方 key、一键越过登录、起停代理与沙箱、三盏状态灯。
+macOS 桌面 app（正常窗口，非菜单栏），把 CSSwitch 的日常操作收进一个面板：第三方 / 官方模式切换、选 provider、填第三方 key、一键开始、起停代理与沙箱、三盏状态灯。
 
 架构上它只是**进程管家**：Rust 后端负责起停子进程、注入环境变量、读写配置、探活。虚拟 OAuth 伪造已在 v0.1.4 移进 Rust 原生实现（`src/oauth_forge.rs`，app 运行时不再需要 node）；翻译逻辑仍在 `proxy/csswitch_proxy.py` 作子进程调用（下一步移 axum 拔 python），沙箱启动仍走 `scripts/launch-virtual-sandbox.sh`，以保住铁律护栏与已验证行为。
 
@@ -24,7 +24,7 @@ desktop/
 - **Rust**（rustup 安装）：<https://www.rust-lang.org/tools/install>
 - **Node** 与 npm：**仅构建/开发时需要**（Tauri CLI 走 npm）。打出的 app **运行时不需要 node**。
 - **Xcode Command Line Tools**（`xcode-select --install`）
-- 已安装 **Claude Science**（一键越登录会启动其沙箱实例）
+- 已安装 **Claude Science**（一键开始会启动其沙箱实例）
 - 第三方 key（DeepSeek 或 DashScope），在面板里填即可（存本地 `~/.csswitch/config.json`，0600）
 
 ## 开发运行

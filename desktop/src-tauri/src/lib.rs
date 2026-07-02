@@ -344,7 +344,7 @@ fn get_config() -> Result<serde_json::Value, String> {
 /// 切到「官方」是**真正的切换**，不只是改配置：先把第三方链路拆掉（停沙箱 Science + 杀代理、
 /// 清 secret）。否则代理/沙箱会留在后台空跑；且 macOS 单实例语义下，后面 `open` 可能只是聚焦
 /// 还活着的沙箱实例（带着改过的 ANTHROPIC_* 环境）而非官方实例，把用户误导回第三方链路。
-/// 切回「第三方」不自动起任何东西（仍需用户填 key 后点「一键越过登录」）。全程绝不碰真实 8765。
+/// 切回「第三方」不自动起任何东西（仍需用户填 key 后点「一键开始」）。全程绝不碰真实 8765。
 #[tauri::command]
 fn set_mode(
     app: tauri::AppHandle,
@@ -631,7 +631,7 @@ fn status(state: State<'_, Mutex<AppState>>) -> serde_json::Value {
 #[tauri::command]
 fn open_url(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
     let url = { lock(&state).sandbox_url.clone() };
-    let url = url.ok_or("还没有沙箱 URL，请先「一键越过登录」。")?;
+    let url = url.ok_or("还没有沙箱 URL，请先「一键开始」。")?;
     open_in_browser(&url)
 }
 

@@ -12,7 +12,7 @@
 
 [Claude Science](https://claude.com) 是一套 **AI agent 原生的科研平台**：从查找、分析文献，到科研数据分析，再到图片与文章制作，全流程打通。
 
-CSSwitch 让你**绕过 Claude 登录**用上它：**无需订阅**，填入你自选的第三方 API（DeepSeek、通义千问，或任意 OpenAI 兼容端点）即可。Science 那套 AI agent 科研体验照旧，底层模型换成你自己的。类比 CC Switch 之于 Claude Code。
+CSSwitch 让你**无需 Claude 订阅**也能用上它：填入你自选的第三方 API（DeepSeek、通义千问，或任意 OpenAI 兼容端点）即可。Science 那套 AI agent 科研体验照旧，底层模型换成你自己的。类比 CC Switch 之于 Claude Code。
 
 ## 背景
 
@@ -31,7 +31,7 @@ DeepSeek 原生 Anthropic 端点  /  通义千问等 OpenAI 兼容端点
 
 **易用**
 
-- **开箱即用**：一个 macOS 桌面 app 把一切串好。你只需填入自己的第三方 API key，点「一键越过登录」，浏览器自动打开已登录的 Science。**零 node 运行时依赖**：虚拟登录已是 Rust 原生实现，装了就能用，不再要求本机有 node。
+- **开箱即用**：一个 macOS 桌面 app 把一切串好。你只需填入自己的第三方 API key，点「一键开始」，浏览器自动打开已登录的 Science。**零 node 运行时依赖**：虚拟登录已是 Rust 原生实现，装了就能用，不再要求本机有 node。
 - **自选模型**：DeepSeek、通义千问，或任意 OpenAI 兼容端点，面板里随时切换。
 - **第三方 / 官方一键切换**：有 Claude 订阅、想走官方时，面板顶部切到「官方 Claude」即可干净交回你真实的 Science 与订阅（CSSwitch 不插手你的官方登录、也不起代理与沙箱）。
 - **原生保真**：DeepSeek 走原生 Anthropic 端点，thinking 与工具调用不失真。
@@ -48,7 +48,7 @@ DeepSeek 原生 Anthropic 端点  /  通义千问等 OpenAI 兼容端点
 
 1. 下载最新 [Release](../../releases/latest) 里的 `CSSwitch_*.dmg`，拖进「应用程序」。首次打开**右键 →「打开」**（未公证，属正常，见下）。
 2. 打开 CSSwitch，弹出一个正常窗口（可拖动 / 缩放 / 最小化）。保持顶部「**第三方模型**」，选 provider，**粘贴你自己的第三方 API key**（只存本地 `~/.csswitch/config.json`，0600）。
-3. 点「**一键越过登录**」。它会自动起代理、写虚拟登录、起隔离沙箱、开浏览器打开已登录的 Science。完事，开始用。
+3. 点「**一键开始**」。它会自动起代理、写虚拟登录、起隔离沙箱、开浏览器打开已登录的 Science。完事，开始用。
 
 > 你唯一要提供的就是**你自己的第三方 API key**（你付费的 key，无法内置到 app 里）。其余全自动。
 >
