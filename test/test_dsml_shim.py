@@ -137,6 +137,22 @@ class ParamTyping(unittest.TestCase):
         blk = wrap_typed(P2, "do", [("x", ' string="true"', "not-an-int")])
         self.assertEqual(ds.parse_dsml_tool_calls(blk, req_tool), [])
 
+    def test_illegal_boolean_voids_block_not_silent_false(self):
+        # Codex P1：非法布尔字面量（如 maybe/garbage）绝不能被臆断成 False 后通过校验，
+        # 否则会合成一个「参数错误」的真实工具调用。应整段作废（保守放行为文本）。
+        bt = {"setflag": {"type": "object", "properties": {"flag": {"type": "boolean"}}, "required": ["flag"]}}
+        for bad in ("maybe", "garbage", "2", "TrueFalseMaybe"):
+            self.assertEqual(ds.parse_dsml_tool_calls(wrap_typed(P2, "setflag", [("flag", "", bad)]), bt), [],
+                             f"非法布尔 {bad!r} 应作废整块")
+
+    def test_legal_boolean_literals_coerce(self):
+        # 合法布尔字面量仍正确转型（大小写不敏感、1/0、yes/no）。
+        bt = {"setflag": {"type": "object", "properties": {"flag": {"type": "boolean"}}, "required": ["flag"]}}
+        for raw, want in [("true", True), ("TRUE", True), ("1", True), ("yes", True),
+                          ("false", False), ("False", False), ("0", False), ("no", False)]:
+            got = ds.parse_dsml_tool_calls(wrap_typed(P2, "setflag", [("flag", "", raw)]), bt)
+            self.assertEqual(got, [{"name": "setflag", "input": {"flag": want}}], f"{raw!r} 应转 {want}")
+
 
 class ShimMode(unittest.TestCase):
     def setUp(self):
@@ -275,6 +291,43 @@ class RewriterPassthrough(unittest.TestCase):
         got = parse_sse(self._run(src, chunk=4))
         self.assertIn("ping", [e for e, _ in got])
         self.assertIn("message_stop", [e for e, _ in got])
+
+    def test_finalize_flushes_unterminated_tail_frame(self):
+        # Codex P1：上游最后一帧无尾随空行（EOF 突然）时，flush_tail 必须补吐这帧，
+        # 否则整条 message_stop（或末尾 delta）被静默吞掉。
+        rw = ds.DsmlStreamRewriter({}, nonce="t")
+        out = rw.feed(b'event: message_stop\ndata: {"type":"message_stop"}\n')  # 注意：只有一个 \n
+        out += rw.finalize()
+        self.assertIn("message_stop", [e for e, _ in parse_sse(out)])
+
+    def test_finalize_flushes_unterminated_message_delta(self):
+        rw = ds.DsmlStreamRewriter({}, nonce="t")
+        out = rw.feed(b'event: message_delta\ndata: {"type":"message_delta",'
+                      b'"delta":{"stop_reason":"end_turn"}}')  # 完全无终止符
+        out += rw.finalize()
+        got = parse_sse(out)
+        self.assertIn("message_delta", [e for e, _ in got])
+
+
+class Detector(unittest.TestCase):
+    def test_flags_response_containing_dsml(self):
+        d = ds.DsmlDetector()
+        d.feed(b"some text ")
+        d.feed(("<" + P2 + "DSML" + P2 + "tool_calls>").encode("utf-8"))
+        self.assertTrue(d.found)
+
+    def test_clean_response_not_flagged(self):
+        d = ds.DsmlDetector()
+        d.feed(b"just a normal answer, no tool markers at all")
+        self.assertFalse(d.found)
+
+    def test_marker_split_across_chunks_still_detected(self):
+        marker = ("｜DSML｜").encode("utf-8")
+        d = ds.DsmlDetector()
+        # 逐字节喂入，标记横跨多次 feed
+        for i in range(len(marker)):
+            d.feed(marker[i:i + 1])
+        self.assertTrue(d.found)
 
     def test_mixed_crlf_lf_frames_no_event_loss(self):
         # CRLF 结束的 content_block_start 后接 LF 结束的 delta 与 stop：事件不能丢、索引成对

@@ -31,6 +31,12 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import dsml_shim
+
+# DSML 兜底 shim 的运行模式：off（默认，字节级透传）/ detect（透传 + 遥测）/ rewrite（改写）。
+# 由 __main__ 依 shim_mode(PROV_NAME, PROV) 覆写（读环境变量 CSSWITCH_TOOLUSE_SHIM）。
+SHIM_MODE = "off"
+
 # ---------- provider 注册表 ----------
 PROVIDERS = {
     "deepseek": {
@@ -661,6 +667,13 @@ class H(BaseHTTPRequestHandler):
         headers = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
         headers.update(_upstream_auth_headers())
         data = json.dumps(body).encode()
+        # DSML 兜底：仅当模式为 detect/rewrite 且本请求确有工具时才介入（无工具 = 无工具调用可泄漏）。
+        # off（默认）与无工具场景：走下面「原样透传」分支，字节级不变、零回归。
+        known_tools = {t["name"]: (t.get("input_schema") or {})
+                       for t in (body.get("tools") or [])
+                       if isinstance(t, dict) and t.get("name")}
+        shim_on = SHIM_MODE in ("detect", "rewrite") and bool(known_tools)
+        nonce = f"{id(areq) & 0xffffff:x}"
         headers_sent = False
         try:
             if stream:
@@ -672,7 +685,21 @@ class H(BaseHTTPRequestHandler):
                     self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
                     headers_sent = True
-                    self.wfile.write(hex(len(first))[2:].encode() + b"\r\n" + first + b"\r\n")
+
+                    def _wc(b):
+                        if b:
+                            self.wfile.write(hex(len(b))[2:].encode() + b"\r\n" + b + b"\r\n")
+
+                    rw = dsml_shim.DsmlStreamRewriter(known_tools, nonce=nonce) \
+                        if (shim_on and SHIM_MODE == "rewrite") else None
+                    det = dsml_shim.DsmlDetector() if (shim_on and SHIM_MODE == "detect") else None
+                    # 第一帧同样要过 shim（状态机/检测器必须从第 0 字节按序看到全部上游数据）。
+                    if rw is not None:
+                        _wc(rw.feed(first))
+                    else:
+                        _wc(first)
+                        if det is not None:
+                            det.feed(first)
                     while True:
                         try:
                             chunk = r.read(4096)
@@ -682,18 +709,41 @@ class H(BaseHTTPRequestHandler):
                             return
                         if not chunk:
                             break
-                        self.wfile.write(hex(len(chunk))[2:].encode() + b"\r\n" + chunk + b"\r\n")
+                        if rw is not None:
+                            _wc(rw.feed(chunk))
+                        else:
+                            _wc(chunk)
+                            if det is not None:
+                                det.feed(chunk)
+                    if rw is not None:
+                        _wc(rw.finalize())
                     self.wfile.write(b"0\r\n\r\n")
-                log(f"  <- {PROV_NAME} 流式透传 OK")
+                if rw is not None and rw.synthesized:
+                    log(f"  <- {PROV_NAME} 流式 DSML 改写 OK（合成 tool_use×{rw.tool_n}）")
+                elif det is not None and det.found:
+                    log(f"  <- {PROV_NAME} 流式透传 OK（!! detect：本响应含 DSML 泄漏，未改写）")
+                else:
+                    log(f"  <- {PROV_NAME} 流式透传 OK")
             else:
                 body_bytes, ct = http_post(PROV["url"], data, headers)
+                if shim_on and SHIM_MODE == "rewrite":
+                    new_bytes = dsml_shim.rewrite_nonstream_body(body_bytes, known_tools, nonce=nonce)
+                    if new_bytes != body_bytes:
+                        log(f"  <- {PROV_NAME} 非流式 DSML 改写 OK（展开 tool_use）")
+                    body_bytes = new_bytes
+                elif shim_on and SHIM_MODE == "detect":
+                    det = dsml_shim.DsmlDetector()
+                    det.feed(body_bytes)
+                    if det.found:
+                        log(f"  !! detect：非流式响应含 DSML 泄漏，未改写")
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header("Content-Length", str(len(body_bytes)))
                 self.end_headers()
                 headers_sent = True
                 self.wfile.write(body_bytes)
-                log(f"  <- {PROV_NAME} 非流式透传 OK")
+                if not (shim_on and SHIM_MODE == "rewrite"):
+                    log(f"  <- {PROV_NAME} 非流式透传 OK")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             log(f"  !! 上游 HTTP {e.code}: {detail}")
@@ -814,8 +864,10 @@ if __name__ == "__main__":
     if not KEY:
         print(f"找不到 {PROV['key_env']}。用环境变量或 --env-file <路径> 提供。", file=sys.stderr)
         sys.exit(1)
+    # DSML 兜底 shim 模式（默认 off；relay 恒 off；deepseek 且 dsml_capable 才读环境变量）。
+    SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
     log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  provider={PROV_NAME}  "
-        f"key=已加载(未显示)  上游={PROV['url']}")
+        f"key=已加载(未显示)  上游={PROV['url']}  dsml_shim={SHIM_MODE}")
     # 绑定重试：上次会话遗留的孤儿代理可能还占着端口（app 侧会主动清，但退干净需一点时间）。
     # 重试 ~3s 等端口释放，避免一次绑不上就直接失败（Errno 48）。
     srv = None

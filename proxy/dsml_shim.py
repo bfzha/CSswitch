@@ -20,6 +20,28 @@ def shim_mode(prov_name, prov):
     m = os.environ.get("CSSWITCH_TOOLUSE_SHIM", "").lower()
     return m if m in ("detect", "rewrite") else "off"
 
+
+class DsmlDetector:
+    """detect 模式：只判定「本响应是否出现 DSML 泄漏标记」，不改一个字节。
+    阶段一遥测用（统计检测发生率，不写盘不改写不宣称修复）。跨 chunk 用小尾缓冲防漏。"""
+
+    _K = max(len(m) for m in DSML_MARKER_BYTES)   # 最长标记的字节数
+
+    def __init__(self):
+        self.found = False
+        self._tail = b""
+
+    def feed(self, data):
+        if self.found or not data:
+            return
+        buf = self._tail + data
+        if any(mk in buf for mk in DSML_MARKER_BYTES):
+            self.found = True
+            self._tail = b""
+            return
+        # 只保留末尾可能是「半个标记」的字节，供下个 chunk 拼接判断。
+        self._tail = buf[-(self._K - 1):] if len(buf) >= self._K else buf
+
 # 分隔符：一到两个全角竖线 U+FF5C（vLLM 文档单、issue #8 实测双）。
 _P = r"[｜]{1,2}"
 _WRAP = r"(?:tool_calls|function_calls)"
@@ -45,7 +67,14 @@ def _coerce_param(pname, string_attr, raw, prop_schema):
         if typ == "number":
             return float(raw)
         if typ == "boolean":
-            return raw.strip().lower() in ("true", "1", "yes")
+            low = raw.strip().lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no"):
+                return False
+            # 不认识的布尔字面量（如 "maybe"）：不臆断为 False，留原字符串，
+            # 交 _type_ok 判非法 → _validate_input 返回 False → 整块作废（保守，宁可放行为文本）。
+            return raw
         if typ in ("object", "array"):
             return json.loads(raw)
     except (ValueError, TypeError, json.JSONDecodeError):
@@ -206,6 +235,12 @@ class DsmlStreamRewriter:
             idx, sep = min(cands)
             frame = self._buf[:idx]
             self._buf = self._buf[idx + sep:]
+            out.append(self._handle_frame(frame))
+        # finalize 时：上游最后一帧若无尾随空行（EOF 突然），也要当作完整帧处理，
+        # 否则整条 message_stop / 末尾 delta 会被静默吞掉（Codex P1）。
+        if flush_tail and self._buf.strip():
+            frame = self._buf
+            self._buf = ""
             out.append(self._handle_frame(frame))
         return b"".join(out)
 
