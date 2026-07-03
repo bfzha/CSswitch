@@ -557,6 +557,14 @@ class NonStream(unittest.TestCase):
         self.assertEqual(out["content"], [{"type": "text", "text": "plain answer"}])
         self.assertEqual(out["stop_reason"], "end_turn")
 
+    def test_no_dsml_returns_verbatim_bytes(self):
+        # 实机验证发现：无泄漏时绝不能做 json 往返——否则不逐字（动到上游不透明字段如
+        # thinking.signature）且让「字节差→已改写」的遥测误报。用「紧凑分隔符 + \\uXXXX 转义」
+        # 的原字节（与 json.dumps(ensure_ascii=False) 不同形），钉死「原样返回原字节」。
+        raw = (b'{"id":"m","type":"message","content":'
+               b'[{"type":"text","text":"caf\\u00e9 \\u4f60\\u597d"}],"stop_reason":"end_turn"}')
+        self.assertEqual(ds.rewrite_nonstream_body(raw, WS, nonce="t"), raw)
+
     def test_unknown_tool_unchanged(self):
         leak = ('<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="evil">'
                 '<｜｜DSML｜｜parameter name="c" string="true">x</｜｜DSML｜｜parameter>'

@@ -488,8 +488,12 @@ def rewrite_nonstream_body(body_bytes, known_tools, nonce=""):
                                             "name": s["name"], "input": s["input"]})
                 continue
         new_content.append(blk)
-    if changed:
-        obj["content"] = new_content
-        if obj.get("stop_reason") in ("end_turn", "stop", None):
-            obj["stop_reason"] = "tool_use"
+    if not changed:
+        # 无泄漏：原样返回上游原字节。既保持【逐字】（不 json 往返、不动上游不透明字段
+        # 如 thinking.signature），也让上层「字节差 → 判定发生改写」的遥测保持准确
+        # （否则任何干净响应都会因 compact↔spaced 再序列化被误报成「已改写」）。
+        return body_bytes
+    obj["content"] = new_content
+    if obj.get("stop_reason") in ("end_turn", "stop", None):
+        obj["stop_reason"] = "tool_use"
     return json.dumps(obj, ensure_ascii=False).encode("utf-8")
