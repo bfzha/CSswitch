@@ -38,6 +38,10 @@ pub struct ProviderCfg {
     pub key: String,
     #[serde(default)]
     pub base_url: String,
+    /// 仅「中转站」(relay-*) 用：面板选中的上游模型 id。非空 → 代理强制所有请求用它；
+    /// 空 → 退回透传（claude-* 直传）。非密钥，可回显。
+    #[serde(default)]
+    pub model: String,
 }
 
 /// 顶层配置。字段都有默认值，缺字段的旧文件也能读。
@@ -90,6 +94,14 @@ impl Config {
             .get(provider)
             .map(|p| p.base_url.clone())
             .filter(|u| !u.is_empty())
+    }
+
+    /// 取某 provider 选中的上游模型（仅 relay-* 用；空串视为未设）。model 不是密钥，可回显。
+    pub fn model_for(&self, provider: &str) -> Option<String> {
+        self.providers
+            .get(provider)
+            .map(|p| p.model.clone())
+            .filter(|m| !m.is_empty())
     }
 }
 
@@ -266,7 +278,8 @@ mod tests {
             "deepseek".into(),
             ProviderCfg {
                 key: "sk-abcdef1234".into(),
-                ..Default::default()
+                base_url: String::new(),
+                model: String::new(),
             },
         );
         save_to(&d, &cfg).unwrap();
@@ -288,6 +301,7 @@ mod tests {
             ProviderCfg {
                 key: "cr_secret".into(),
                 base_url: "https://byteswarm.ai/claude".into(),
+                model: String::new(),
             },
         );
         save_to(&d, &cfg).unwrap();
@@ -299,6 +313,48 @@ mod tests {
         assert_eq!(got.key_for("relay").as_deref(), Some("cr_secret"));
         // 未设 base_url 的 provider（缺字段的旧文件也走这条）→ None。
         assert_eq!(got.base_url_for("deepseek"), None);
+    }
+
+    #[test]
+    fn relay_model_roundtrips_and_helper_reads_it() {
+        // 多槽：每预设各存 {key, base_url, model}；model 空串视为未设。
+        let d = tmpdir().join(".csswitch");
+        let mut cfg = Config {
+            provider: "relay-xiaomi".into(),
+            ..Default::default()
+        };
+        cfg.providers.insert(
+            "relay-xiaomi".into(),
+            ProviderCfg {
+                key: "mimo_key".into(),
+                base_url: "https://api.xiaomimimo.com/anthropic".into(),
+                model: "mimo-v2.5-pro".into(),
+            },
+        );
+        save_to(&d, &cfg).unwrap();
+        let got = load_from(&d).unwrap();
+        assert_eq!(
+            got.model_for("relay-xiaomi").as_deref(),
+            Some("mimo-v2.5-pro")
+        );
+        assert_eq!(got.key_for("relay-xiaomi").as_deref(), Some("mimo_key"));
+        // 未设 model（缺字段的旧文件也走这条）→ None。
+        assert_eq!(got.model_for("deepseek"), None);
+    }
+
+    #[test]
+    fn old_config_without_model_field_still_loads() {
+        // 旧文件没有 model 字段：serde default 补空串，model_for → None，不报错。
+        let d = tmpdir().join(".csswitch");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            config_path(&d),
+            br#"{"provider":"relay","providers":{"relay":{"key":"k","base_url":"https://x/y"}}}"#,
+        )
+        .unwrap();
+        let got = load_from(&d).unwrap();
+        assert_eq!(got.base_url_for("relay").as_deref(), Some("https://x/y"));
+        assert_eq!(got.model_for("relay"), None);
     }
 
     #[test]
@@ -396,7 +452,8 @@ mod tests {
                 "qwen".into(),
                 ProviderCfg {
                     key: "k-xyz".into(),
-                    ..Default::default()
+                    base_url: String::new(),
+                    model: String::new(),
                 },
             );
         })
