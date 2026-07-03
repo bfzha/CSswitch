@@ -364,8 +364,15 @@ pub fn load_from(dir: &Path) -> io::Result<Config> {
     }
 }
 
-/// active_id 指向不存在的 profile → 归一化为空（运行时据此停代理、要求用户选）。
+/// 加载后归一化两个不变式（spec §4）：
+/// - `template_id` 未命中注册表 → 归一化为 `custom`（保留连接字段；据它派生 adapter/UI 能力）；
+/// - `active_id` 指向不存在的 profile → 归一化为空（运行时据此停代理、要求用户选）。
 fn normalize_active(mut cfg: Config) -> Config {
+    for p in cfg.profiles.iter_mut() {
+        if crate::templates::by_id(&p.template_id).is_none() {
+            p.template_id = "custom".to_string();
+        }
+    }
     if !cfg.active_id.is_empty() && cfg.profile_by_id(&cfg.active_id).is_none() {
         cfg.active_id.clear();
     }
@@ -754,6 +761,33 @@ mod tests {
         save_to(&d, &cfg).unwrap();
         let got = load_from(&d).unwrap();
         assert_eq!(got.active_id, "", "悬空 active → 归一化为空");
+    }
+
+    // ---------- MP-2 Minor [2]: template_id 未命中 → 归一 custom ----------
+    #[test]
+    fn load_normalizes_unknown_template_id_to_custom() {
+        let d = tmpdir().join(".csswitch");
+        // 造一条 template_id 未命中注册表的 v2 profile（连接字段保留）。
+        let cfg = Config {
+            active_id: "p1".into(),
+            profiles: vec![Profile {
+                id: "p1".into(),
+                name: "野模板".into(),
+                template_id: "totally-unknown-xyz".into(),
+                api_format: "anthropic".into(),
+                base_url: "https://relay.example/claude".into(),
+                api_key: "sk-x".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        save_to(&d, &cfg).unwrap();
+        let got = load_from(&d).unwrap();
+        let p = got.profile_by_id("p1").unwrap();
+        assert_eq!(p.template_id, "custom", "未命中 template_id → 归一 custom");
+        assert_eq!(p.base_url, "https://relay.example/claude", "连接字段保留");
+        assert_eq!(p.api_key, "sk-x");
+        assert_eq!(got.active_id, "p1", "active 仍有效，不被清空");
     }
 
     // ---------- 既有安全/权限不变量（保留） ----------

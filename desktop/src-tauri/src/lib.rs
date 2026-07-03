@@ -283,9 +283,9 @@ enum ProxyAction {
 /// 切换事务的提交/回滚决策（纯函数，spec §7）。live 路径难做确定性单测，故把决策抽出单独测。
 #[derive(Debug, PartialEq)]
 enum SwitchOutcome {
-    Commit,            // scratch 校验过 + 正式代理探活健康 → 提交 active_id
-    RollbackToOld,     // scratch 过但正式代理起/探活失败 → 杀候选、恢复旧代理、不提交
-    AbortBeforeStart,  // scratch 校验失败 → 根本没起正式代理、旧态零改动
+    Commit,           // scratch 校验过 + 正式代理探活健康 → 提交 active_id
+    RollbackToOld,    // scratch 过但正式代理起/探活失败 → 杀候选、恢复旧代理、不提交
+    AbortBeforeStart, // scratch 校验失败 → 根本没起正式代理、旧态零改动
 }
 
 /// 给定「候选 scratch 校验结果」与「正式代理探活结果」，决定切换事务走向。
@@ -301,19 +301,37 @@ fn decide_switch(scratch_ok: bool, real_healthy: bool) -> SwitchOutcome {
 }
 
 /// 确保代理在跑且健康；返回 (端口, secret, 本次动作)。幂等：已健康则复用。
-/// 读【生效 profile】派生 adapter/base_url/model/key，起 python 代理 `--provider <adapter>`。
+/// 读【生效 profile】派生 adapter/base_url/model/key，委托 [`start_proxy_for`]。
 fn ensure_proxy(
     app: &tauri::AppHandle,
     state: &State<'_, Mutex<AppState>>,
+    lifecycle: &lifecycle::Lifecycle,
 ) -> Result<(u16, String, ProxyAction), String> {
-    let dir = config::default_dir();
-    let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
+    let cfg = config::load_from(&config::default_dir()).map_err(|e| e.to_string())?;
     let profile = cfg
         .active_profile()
         .cloned()
         .ok_or("未配置生效 profile，请先在面板选择或新建一条配置。")?;
-    assert_format_supported(&profile)?;
-    let launch = proxy_args_for(&profile);
+    start_proxy_for(app, state, lifecycle, &profile)
+}
+
+/// 用【给定 profile】（不读 active）起代理并探活；返回 (端口, secret, 动作)。
+///
+/// 并发正确性（spec §8.1）：
+/// - **读-spawn 原子**：复用判定 / 清残留 / spawn 都在同一把 AppState 锁内；新 child 先握本地。
+/// - **探活锁外**：探活刻意在 AppState 锁外做，不阻塞 status 等命令。
+/// - **generation token**：spawn 前抓 `gen`；探活健康后回锁校验 `current_generation()==gen`，
+///   若期间被清 key/停/切 bump 过 → 杀掉自己刚起的 child、**不写回 st.proxy**（不拿旧配置复活）。
+///
+/// 本函数**绝不取串行器锁**（调用方命令才取），故与命令层的 `with_serialized` 不会自死锁。
+fn start_proxy_for(
+    app: &tauri::AppHandle,
+    state: &State<'_, Mutex<AppState>>,
+    lifecycle: &lifecycle::Lifecycle,
+    profile: &config::Profile,
+) -> Result<(u16, String, ProxyAction), String> {
+    assert_format_supported(profile)?;
+    let launch = proxy_args_for(profile);
     if launch.key.is_empty() {
         return Err(format!(
             "「{}」还没填 API key，请先在面板填写并保存。",
@@ -331,6 +349,8 @@ fn ensure_proxy(
         "{}\n{}\n{}\n{}",
         launch.adapter, launch.base_url, launch.model, launch.key
     ));
+    let dir = config::default_dir();
+    let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
     let port = cfg.proxy_port;
     let root = asset_root(app)
         .ok_or("找不到代理脚本 proxy/csswitch_proxy.py（打包资源或仓库根均未命中）。开发态可设 CSSWITCH_REPO。")?;
@@ -348,8 +368,12 @@ fn ensure_proxy(
         s
     };
 
-    // 整个「检查 → 清残留 → 起进程 → 记账」在同一把锁内完成，避免并发双击时孤儿泄漏。
-    {
+    // generation token：**spawn 前**抓当前号；探活后回锁比对，防被更晚操作取代还写回。
+    let gen = lifecycle.current_generation();
+
+    // 「检查复用 → 清残留 → 起进程」在同一把 AppState 锁内完成（读-spawn 原子）。
+    // 但新 child 只握在本地，**探活健康 + generation 未变**才写回 st.proxy。
+    let child = {
         let mut st = lock(state);
         // 幂等：已在跑且健康、且【端口 + adapter + key 指纹】都一致才复用。
         if st.proxy.is_some()
@@ -360,7 +384,10 @@ fn ensure_proxy(
         {
             return Ok((port, st.secret.clone(), ProxyAction::Reused));
         }
+        // 端口要让给新进程 → 先杀掉旧占用者（st.proxy）与同端口孤儿；期间 st.proxy=None。
         kill_child(&mut st.proxy);
+        st.provider.clear();
+        st.key_fp = 0;
         let script = root.join("proxy/csswitch_proxy.py");
         // 再清掉上次会话遗留、绑在同端口上的孤儿代理（匹配本安装的绝对脚本路径 + 端口）。
         let pat = format!("{}.*--port {port}", ere_escape(&script.to_string_lossy()));
@@ -385,19 +412,14 @@ fn ensure_proxy(
                 cmd.env("CSSWITCH_RELAY_MODEL", &launch.model);
             }
         }
-        let child = cmd
-            .stdout(Stdio::from(logf))
+        cmd.stdout(Stdio::from(logf))
             .stderr(Stdio::from(logf2))
             .spawn()
-            .map_err(|e| format!("启动代理失败：{e}"))?;
-        st.proxy = Some(child);
-        st.proxy_port = port;
-        st.secret = secret.clone();
-        st.provider = launch.adapter.clone();
-        st.key_fp = key_fp;
-    }
+            .map_err(|e| format!("启动代理失败：{e}"))?
+        // 注意：child 未写入 st.proxy——探活通过且 generation 未变时才回锁写回。
+    };
 
-    // 探活最多 ~4s（锁外，不阻塞 status 等命令）。
+    // 探活最多 ~4s（AppState 锁外，不阻塞 status 等命令）。
     let mut ok = false;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(100));
@@ -407,14 +429,31 @@ fn ensure_proxy(
         }
     }
     if !ok {
-        let mut st = lock(state);
-        if st.secret == secret {
-            kill_child(&mut st.proxy);
-        }
+        // 探活失败：杀掉自己刚起的 child（它从未写入 st.proxy，绝不留孤儿）。
+        let mut c = child;
+        let _ = c.kill();
+        let _ = c.wait();
         let tail = redact(&tail_file(&log_path("proxy.log"), 500), &secret);
         return Err(format!(
             "代理起后探活超时（端口 {port} 可能被占用，或 key 无效）。\n{tail}"
         ));
+    }
+
+    // 健康 → 回 AppState 锁，校验 generation 未被 bump（未被清 key/停/切取代）才写回。
+    {
+        let mut st = lock(state);
+        if lifecycle.current_generation() != gen {
+            // 被更晚的操作取代：杀掉自己刚起的 child、不写回 st.proxy（不拿旧配置复活）。
+            let mut c = child;
+            let _ = c.kill();
+            let _ = c.wait();
+            return Err("代理启动期间配置已变更（被更晚的操作取代），本次启动未生效。".into());
+        }
+        st.proxy = Some(child);
+        st.proxy_port = port;
+        st.secret = secret.clone();
+        st.provider = launch.adapter.clone();
+        st.key_fp = key_fp;
     }
     Ok((port, secret, ProxyAction::Restarted))
 }
@@ -540,6 +579,14 @@ fn update_profile_metadata_inner(
     name: &str,
     notes: Option<&str>,
 ) -> Result<(), String> {
+    // 未命中 id → Err（不静默 Ok，修 MP-1 Minor [4]）。
+    if config::load_from(dir)
+        .map_err(|e| e.to_string())?
+        .profile_by_id(id)
+        .is_none()
+    {
+        return Err(format!("找不到 profile：{id}"));
+    }
     config::update(dir, |c| {
         if let Some(p) = c.profile_by_id_mut(id) {
             p.name = name.to_string();
@@ -587,6 +634,14 @@ fn update_profile_connection_inner(
             ..Default::default()
         };
         assert_format_supported(&probe)?;
+    }
+    // 未命中 id → Err（不静默 Ok，修 MP-1 Minor [4]）。
+    if config::load_from(dir)
+        .map_err(|e| e.to_string())?
+        .profile_by_id(id)
+        .is_none()
+    {
+        return Err(format!("找不到 profile：{id}"));
     }
     config::write_rolling_backup(dir).ok(); // 覆盖前留底
     config::update(dir, |c| {
@@ -699,38 +754,87 @@ fn set_settings(cfg: UiSettings) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-// ---------- profile CRUD 命令（薄包装 *_inner） ----------
+// ---------- profile CRUD 命令（薄包装 *_inner，统一经串行器） ----------
 #[tauri::command]
 fn create_profile(
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     template_id: String,
     name: String,
     key: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
 ) -> Result<String, String> {
-    create_profile_inner(
-        &config::default_dir(),
-        &template_id,
-        &name,
-        key.as_deref(),
-        base_url.as_deref(),
-        model.as_deref(),
-    )
+    lifecycle.with_serialized(|| {
+        create_profile_inner(
+            &config::default_dir(),
+            &template_id,
+            &name,
+            key.as_deref(),
+            base_url.as_deref(),
+            model.as_deref(),
+        )
+    })
 }
 
 #[tauri::command]
-fn update_profile_metadata(id: String, name: String, notes: Option<String>) -> Result<(), String> {
-    update_profile_metadata_inner(&config::default_dir(), &id, &name, notes.as_deref())
+fn update_profile_metadata(
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    id: String,
+    name: String,
+    notes: Option<String>,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        update_profile_metadata_inner(&config::default_dir(), &id, &name, notes.as_deref())
+    })
 }
 
+/// 清 key：经串行器；若清的是【生效】profile → bump_generation 作废在途启动 + 停运行中代理
+/// （不再拿旧 key 服务，比照 spec §8.2 运行态撤销）。
 #[tauri::command]
-fn clear_profile_key(id: String) -> Result<(), String> {
-    clear_profile_key_inner(&config::default_dir(), &id)
+fn clear_profile_key(
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    id: String,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let was_active = config::load_from(&dir)
+            .map(|c| c.active_id == id)
+            .unwrap_or(false);
+        clear_profile_key_inner(&dir, &id)?;
+        if was_active {
+            lifecycle.bump_generation();
+            let mut st = lock(&state);
+            kill_child(&mut st.proxy);
+            st.provider.clear();
+            st.key_fp = 0;
+        }
+        Ok(())
+    })
 }
 
+/// 删 profile：经串行器；删的是【生效】profile → active 置空（inner 内）+ bump + 停代理。
 #[tauri::command]
-fn delete_profile(id: String) -> Result<(), String> {
-    delete_profile_inner(&config::default_dir(), &id)
+fn delete_profile(
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    id: String,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let was_active = config::load_from(&dir)
+            .map(|c| c.active_id == id)
+            .unwrap_or(false);
+        delete_profile_inner(&dir, &id)?;
+        if was_active {
+            lifecycle.bump_generation();
+            let mut st = lock(&state);
+            kill_child(&mut st.proxy);
+            st.provider.clear();
+            st.key_fp = 0;
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -738,45 +842,62 @@ fn delete_profile(id: String) -> Result<(), String> {
 fn update_profile_connection(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     id: String,
     base_url: Option<String>,
     api_format: Option<String>,
     model: Option<String>,
     key: Option<String>,
 ) -> Result<(), String> {
-    // MP-2: 升级为事务+串行器（rollback/generation token）
-    let dir = config::default_dir();
-    update_profile_connection_inner(
-        &dir,
-        &id,
-        base_url.as_deref(),
-        api_format.as_deref(),
-        model.as_deref(),
-        key.as_deref(),
-    )?;
-    // 若改的是当前生效 profile，连接变更后重启代理让新连接生效（修 P1-4）。
-    let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
-    if cfg.active_id == id {
-        ensure_proxy(&app, &state)?;
-    }
-    Ok(())
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        // 先持久化连接字段（未命中 id → Err，见 update_profile_connection_inner）。
+        update_profile_connection_inner(
+            &dir,
+            &id,
+            base_url.as_deref(),
+            api_format.as_deref(),
+            model.as_deref(),
+            key.as_deref(),
+        )?;
+        // 若改的是当前生效 profile：走切换事务（校验→起正式→健康→提交/回滚），而非裸重启（修 P1-4）。
+        let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
+        if cfg.active_id == id {
+            set_active_profile_txn(&app, &state, lifecycle.inner(), &id, false).map(|_| ())
+        } else {
+            Ok(())
+        }
+    })
 }
 
-/// 一键切生效 profile（简化版 = 旧 save_relay_config 同款 commit-then-ensure）：
-/// relay 家族先 scratch 校验候选 → 提交 active_id → ensure_proxy 切正式代理。
-/// deepseek/qwen 原生 adapter 走固定官方端点，不做 scratch 预检（历史行为一致）。
+/// 一键切生效 profile：经串行器走 [`set_active_profile_txn`] 切换事务。
 #[tauri::command]
 fn set_active_profile(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     id: String,
     skip_verify: bool,
 ) -> Result<serde_json::Value, String> {
-    // MP-2: 升级为事务+串行器（rollback/generation token）
+    lifecycle.with_serialized(|| {
+        set_active_profile_txn(&app, &state, lifecycle.inner(), &id, skip_verify)
+    })
+}
+
+/// 切换事务本体（spec §7）：scratch 校验候选 → 起正式代理探活 → 探活健康【才】提交 active_id；
+/// 任一步失败杀候选 + 恢复旧代理，`active_id` 不动，**不停沙箱**（path-secret 持久，端口+secret
+/// 不变，沙箱链路不断，停沙箱只会扩大失败面）。**本函数不取串行器锁**（调用方命令已持有）。
+fn set_active_profile_txn(
+    app: &tauri::AppHandle,
+    state: &State<'_, Mutex<AppState>>,
+    lifecycle: &lifecycle::Lifecycle,
+    id: &str,
+    skip_verify: bool,
+) -> Result<serde_json::Value, String> {
     let dir = config::default_dir();
     let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
     let candidate = cfg
-        .profile_by_id(&id)
+        .profile_by_id(id)
         .cloned()
         .ok_or_else(|| format!("找不到 profile：{id}"))?;
     assert_format_supported(&candidate)?;
@@ -788,10 +909,16 @@ fn set_active_profile(
     if !native && launch.base_url.is_empty() {
         return Err("该配置需要填 base_url（http:// 或 https:// 开头）。".into());
     }
+    // 快照旧 active（回滚锚点）：旧 profile 仍在盘上未动、active_id 未改，恢复据它重起旧代理。
+    let old_active = cfg.active_id.clone();
 
-    // relay 家族（任意 base_url）：sctatch 代理校验候选（不碰正式链路）。
-    if !native && !skip_verify {
-        let root = asset_root(&app).ok_or("找不到代理脚本 proxy/csswitch_proxy.py。")?;
+    // 1) scratch 校验候选（临时端口+secret+候选 key，避开 8765；绝不碰正式链路）。
+    //    relay 家族做预检；deepseek/qwen 原生固定端点历史上不预检（保持旧行为）。
+    //    分类失败保留结构化提示（committed:false/can_skip），前端 UX 不变。
+    let scratch_ok = if native || skip_verify {
+        true
+    } else {
+        let root = asset_root(app).ok_or("找不到代理脚本 proxy/csswitch_proxy.py。")?;
         let py = proc::find_exe("python3").ok_or("缺少依赖 python3（起临时代理需要）。")?;
         let script = root.join("proxy/csswitch_proxy.py");
         let res = scratch::scratch_probe(
@@ -803,7 +930,7 @@ fn set_active_profile(
             probe_kind_for_model(&launch.model),
         );
         match scratch::classify(res.status) {
-            scratch::ProbeOutcome::Ok => {}
+            scratch::ProbeOutcome::Ok => true,
             scratch::ProbeOutcome::Auth(code) => {
                 return Ok(json!({ "committed": false,
                     "hint": format!("上游拒绝（{code}），key/权限有误，未切换（当前配置不变）。") }));
@@ -817,21 +944,59 @@ fn set_active_profile(
                     "hint": "无法确认（网络/上游繁忙），未切换。可重试，或用「跳过验证」。" }));
             }
         }
-    }
+    };
 
-    // 提交 active_id（commit-then-ensure：先落盘再切代理；代理失败不回滚，待 MP-2 事务化）。
-    config::update(&dir, |c| c.active_id = id.clone()).map_err(|e| e.to_string())?;
-    ensure_proxy(&app, &state)?;
-    Ok(json!({ "committed": true, "active_id": id,
-        "hint": format!("已切到「{}」。", candidate.name) }))
+    // 2/3) 用候选起【正式代理】并探活。bump_generation 使并发中的旧启动（如同时的 verify_key）作废。
+    lifecycle.bump_generation();
+    let real_healthy = scratch_ok && start_proxy_for(app, state, lifecycle, &candidate).is_ok();
+
+    match decide_switch(scratch_ok, real_healthy) {
+        SwitchOutcome::Commit => {
+            // 探活健康【才】提交 active_id（盘上与运行态一致，杜绝「盘新运行旧」）。
+            config::update(&dir, |c| c.active_id = id.to_string()).map_err(|e| e.to_string())?;
+            Ok(json!({ "committed": true, "active_id": id,
+                "hint": format!("已切到「{}」。", candidate.name) }))
+        }
+        SwitchOutcome::RollbackToOld => {
+            // 候选正式代理起/探活失败：恢复旧代理，active_id 不动，不停沙箱。
+            restore_proxy_for_active(app, state, lifecycle, &cfg, &old_active);
+            Err(
+                "候选配置校验通过，但正式代理启动/探活失败，已回滚到原配置（沙箱未受影响）。"
+                    .into(),
+            )
+        }
+        SwitchOutcome::AbortBeforeStart => {
+            // scratch 校验未过（native+skip 场景不会到这）；旧态零改动。
+            Err("候选上游校验失败（key/base_url/网络？），未切换。".into())
+        }
+    }
+}
+
+/// 切换失败回滚：按【旧 active】重起旧代理（旧 profile 仍在盘上）；best-effort，失败则代理暂停、
+/// active_id 仍为旧值，用户可重试。旧 active 为空（此前未配置生效）→ 不复活，保持代理停着。
+fn restore_proxy_for_active(
+    app: &tauri::AppHandle,
+    state: &State<'_, Mutex<AppState>>,
+    lifecycle: &lifecycle::Lifecycle,
+    cfg: &config::Config,
+    old_active: &str,
+) {
+    if old_active.is_empty() {
+        return;
+    }
+    if let Some(old) = cfg.profile_by_id(old_active) {
+        lifecycle.bump_generation();
+        let _ = start_proxy_for(app, state, lifecycle, old);
+    }
 }
 
 #[tauri::command]
 fn start_proxy(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
 ) -> Result<serde_json::Value, String> {
-    let (port, _secret, _action) = ensure_proxy(&app, &state)?;
+    let (port, _secret, _action) = ensure_proxy(&app, &state, lifecycle.inner())?;
     Ok(json!({ "port": port }))
 }
 
@@ -840,8 +1005,9 @@ fn start_proxy(
 fn verify_key(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
 ) -> Result<serde_json::Value, String> {
-    let (port, secret, _action) = ensure_proxy(&app, &state)?;
+    let (port, secret, _action) = ensure_proxy(&app, &state, lifecycle.inner())?;
     let body = br#"{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#;
     match proc::http_post_status(port, Some(&secret), "/v1/messages", body, 15000) {
         Some(200) => Ok(json!({ "ok": true, "hint": "key 有效，上游已接受。" })),
@@ -998,21 +1164,40 @@ fn probe_kind_for_model(model: &str) -> scratch::ProbeKind {
 }
 
 #[tauri::command]
-fn stop_all(app: tauri::AppHandle, state: State<'_, Mutex<AppState>>) -> Result<(), String> {
-    let mut st = lock(&state);
-    let sandbox_res = stop_sandbox_inner(&app, &mut st);
-    kill_child(&mut st.proxy);
-    st.secret.clear();
-    sandbox_res.map_err(|e| format!("代理已停；但{e}真实实例 8765 未受影响。"))
+fn stop_all(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        lifecycle.bump_generation(); // 作废任何在途启动（防被停后又拿旧 key 复活）
+        let mut st = lock(&state);
+        let sandbox_res = stop_sandbox_inner(&app, &mut st);
+        kill_child(&mut st.proxy);
+        st.secret.clear();
+        st.provider.clear();
+        st.key_fp = 0;
+        sandbox_res.map_err(|e| format!("代理已停；但{e}真实实例 8765 未受影响。"))
+    })
 }
 
 #[tauri::command]
 fn one_click_login(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+) -> Result<serde_json::Value, String> {
+    lifecycle.with_serialized(|| one_click_login_inner(app, state, lifecycle.inner()))
+}
+
+/// 一键开始本体（经串行器）：确保代理在跑且健康 → 幂等虚拟登录 → 起沙箱 → 打开 UI。
+fn one_click_login_inner(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: &lifecycle::Lifecycle,
 ) -> Result<serde_json::Value, String> {
     // 1~3. 确保代理在跑且健康（内部已查生效 profile、key、探活）。带回本次是复用还是重启。
-    let (pport, secret, proxy_action) = ensure_proxy(&app, &state)?;
+    let (pport, secret, proxy_action) = ensure_proxy(&app, &state, lifecycle)?;
 
     let dir = config::default_dir();
     let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
@@ -1391,8 +1576,9 @@ mod tests {
         assert_format_supported, build_get_config, build_list_templates, clear_profile_key_inner,
         create_profile_inner, decide_switch, delete_profile_inner, first_http_url,
         is_main_list_model, key_env_for_adapter, key_fingerprint, merge_and_sort_models,
-        parse_host, probe_kind_for_model, proxy_args_for, redact, sandbox_home, SwitchOutcome,
+        parse_host, probe_kind_for_model, proxy_args_for, redact, sandbox_home,
         update_profile_connection_inner, update_profile_metadata_inner, upstream_host,
+        SwitchOutcome,
     };
     use crate::config;
 
@@ -1544,6 +1730,32 @@ mod tests {
             None,
         );
         assert!(e.is_err());
+    }
+
+    // ---------- MP-2 Minor [4]: 未命中 id → Err（不静默 Ok） ----------
+    #[test]
+    fn update_metadata_unknown_id_errors() {
+        let d = tmpdir_lib();
+        create_profile_inner(&d, "glm", "GLM", Some("k"), None, None).unwrap();
+        let e = update_profile_metadata_inner(&d, "no-such-id", "改名", None);
+        assert!(e.is_err(), "未命中 id 应报错，而非静默成功");
+        assert!(e.unwrap_err().contains("找不到 profile"));
+    }
+
+    #[test]
+    fn update_connection_unknown_id_errors() {
+        let d = tmpdir_lib();
+        create_profile_inner(&d, "glm", "GLM", Some("k"), None, None).unwrap();
+        let e = update_profile_connection_inner(
+            &d,
+            "no-such-id",
+            Some("https://x/y"),
+            None,
+            None,
+            None,
+        );
+        assert!(e.is_err(), "未命中 id 应报错，而非静默成功");
+        assert!(e.unwrap_err().contains("找不到 profile"));
     }
 
     // ---------- B5: build_get_config / build_list_templates ----------
