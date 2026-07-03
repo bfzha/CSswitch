@@ -598,70 +598,139 @@ fn verify_key(
 
 #[derive(Deserialize)]
 struct RelayModelsReq {
+    /// 预设 id（relay-xiaomi / … / relay-custom）；用于 builtin 兜底。
+    preset: String,
     base_url: String,
+    /// 用户新填的 key；为空表示沿用该预设已存的 key（后端不回传完整 key）。
     key: String,
 }
 
-/// 「获取中转站可用模型」：把面板填的 base_url / token 存进 relay 配置（token 为空=沿用已存）、
-/// 切到 relay，起 relay 代理，再经**本地回环代理**回源拉中转站 `/v1/models`
-/// （回源的 TLS 由代理的 urllib 完成，Rust 侧只打回环明文，无需引 TLS）。
-/// 返回 `{models:[id,...]}`——会平铺进 Science 选择器主列表的 id 排前。
+/// live 探测结果（id + 能力）∪ 预设 builtin，去重（按 id）+ 排序（true>null>false，主列表 id 微调靠前）。
+/// 纯逻辑，便于单测。
+fn merge_and_sort_models(
+    live: Vec<(String, Option<bool>)>,
+    builtin: &[&str],
+) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut merged: Vec<(String, Option<bool>)> = Vec::new();
+    for (id, st) in live {
+        if seen.insert(id.clone()) {
+            merged.push((id, st));
+        }
+    }
+    for b in builtin {
+        if seen.insert(b.to_string()) {
+            merged.push((b.to_string(), None)); // builtin 无能力信息 → null
+        }
+    }
+    // 排序键：能力档（true=0, null=1, false=2）为主，主列表 id 在同档内微靠前。
+    merged.sort_by_key(|(id, st)| {
+        let cap = match st {
+            Some(true) => 0u8,
+            None => 1,
+            Some(false) => 2,
+        };
+        let main = if is_main_list_model(id) { 0u8 } else { 1 };
+        (cap, main)
+    });
+    merged
+        .into_iter()
+        .map(|(id, st)| json!({ "id": id, "supports_tools": st }))
+        .collect()
+}
+
+/// 解析探测用 key：新填的优先，否则沿用该预设已存的（后端内部用，绝不回传前端）。
+fn resolve_probe_key(preset: &str, candidate: &str) -> Result<String, String> {
+    let c = candidate.trim();
+    if !c.is_empty() {
+        return Ok(c.to_string());
+    }
+    let cfg = config::load_from(&config::default_dir()).map_err(|e| e.to_string())?;
+    cfg.key_for(preset)
+        .ok_or_else(|| "请先填写中转站 API Key / Token。".to_string())
+}
+
+/// 「获取中转站可用模型」——**纯 scratch 探测**（修评审 P1-2）：只用临时代理探候选
+/// base_url/key 的 /v1/models，**绝不写 config、不改 AppState、不碰正在服务 Science 的正式代理**
+/// （用户查看别家模型不会切走当前对话）。返回 {models:[{id,supports_tools}], source, error_kind, upstream_status}。
 #[tauri::command]
 fn fetch_relay_models(
     app: tauri::AppHandle,
-    state: State<'_, Mutex<AppState>>,
     req: RelayModelsReq,
 ) -> Result<serde_json::Value, String> {
-    let dir = config::default_dir();
-    let base_url = req.base_url.trim().to_string();
-    let key = req.key.trim().to_string();
-    // 落盘 relay 配置并切到 relay（供 ensure_proxy 起 relay 代理）。token 为空表示沿用已存的。
-    let (bu, k) = (base_url.clone(), key.clone());
-    config::update(&dir, move |c| {
-        c.provider = "relay".into();
-        let e = c.providers.entry("relay".into()).or_default();
-        if !bu.is_empty() {
-            e.base_url = bu;
-        }
-        if !k.is_empty() {
-            e.key = k;
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    // 用落盘后的最终值校验。
-    let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
-    let bu = cfg.base_url_for("relay").unwrap_or_default();
-    if bu.is_empty() || !(bu.starts_with("http://") || bu.starts_with("https://")) {
+    let preset_id = req.preset.trim();
+    let preset =
+        relay_presets::by_id(preset_id).ok_or_else(|| format!("未知中转站预设：{preset_id}"))?;
+    // base_url：预设不可编辑则用预设的；自定义用前端填的。
+    let base_url = if preset.base_url_editable {
+        req.base_url.trim().to_string()
+    } else {
+        preset.base_url.to_string()
+    };
+    if base_url.is_empty() || !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+    {
         return Err("请先填写中转站 base_url（http:// 或 https:// 开头）。".into());
     }
-    if cfg.key_for("relay").is_none() {
-        return Err("请先填写中转站 API Key / Token。".into());
-    }
-    // 起 relay 代理（内部已校验 key/base_url、探活），经回环代理回源拉 /v1/models。
-    let (port, secret, _action) = ensure_proxy(&app, &state)?;
-    match proc::http_get_body(port, Some(&secret), "/v1/models", 20000) {
-        Some((200, body)) => {
+    let key = resolve_probe_key(preset_id, &req.key)?;
+    let root = asset_root(&app).ok_or("找不到代理脚本 proxy/csswitch_proxy.py。")?;
+    let py = proc::find_exe("python3").ok_or("缺少依赖 python3（起临时代理需要）。")?;
+    let script = root.join("proxy/csswitch_proxy.py");
+
+    let res = scratch::scratch_probe(
+        &py,
+        &script,
+        &base_url,
+        &key,
+        None,
+        scratch::ProbeKind::Models,
+    );
+    let builtin = preset.builtin_models;
+    match scratch::classify(res.status) {
+        scratch::ProbeOutcome::Ok => {
+            // 解析 body 的 data[].{id, supports_tools}。
             let v: serde_json::Value =
-                serde_json::from_str(&body).map_err(|e| format!("解析模型列表失败：{e}"))?;
-            let mut ids: Vec<String> = v
+                serde_json::from_str(&res.body).map_err(|e| format!("解析模型列表失败：{e}"))?;
+            let live: Vec<(String, Option<bool>)> = v
                 .get("data")
                 .and_then(|d| d.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
+                        .filter_map(|m| {
+                            let id = m.get("id")?.as_str()?.to_string();
+                            let st = m.get("supports_tools").and_then(|b| b.as_bool());
+                            Some((id, st))
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            if ids.is_empty() {
-                return Err("中转站没有返回可用模型（/v1/models 为空）。".into());
+            if live.is_empty() {
+                // 200 但空列表：退回 builtin，标 source=builtin。
+                return Ok(json!({
+                    "models": merge_and_sort_models(vec![], builtin),
+                    "source": "builtin", "error_kind": null, "upstream_status": 200
+                }));
             }
-            // 稳定排序：主列表项（会平铺进选择器）排前，其余保持上游顺序。
-            ids.sort_by_key(|id| if is_main_list_model(id) { 0u8 } else { 1u8 });
-            Ok(json!({ "models": ids }))
+            Ok(json!({
+                "models": merge_and_sort_models(live, builtin),
+                "source": "live", "error_kind": null, "upstream_status": 200
+            }))
         }
-        Some((code @ (401 | 403), _)) => Err(format!("中转站拒绝（{code}），key 或权限可能有误。")),
-        Some((code, _)) => Err(format!("中转站返回 {code}，无法获取模型列表。")),
-        None => Err("获取模型无响应（多为网络或中转站不通）。".into()),
+        scratch::ProbeOutcome::Auth(code) => {
+            // 硬失败：key/权限有误，不回列表（修评审 P2-1，不拿 builtin 掩盖坏 key）。
+            Err(format!("中转站拒绝（{code}），key 或权限可能有误。"))
+        }
+        scratch::ProbeOutcome::ModelError(code) => {
+            // 404 等：多为该站无 /v1/models（如小米）→ 退回 builtin，前端标「内置/未验证」。
+            Ok(json!({
+                "models": merge_and_sort_models(vec![], builtin),
+                "source": "builtin", "error_kind": null, "upstream_status": code
+            }))
+        }
+        // Ambiguous(429/5xx) / NoResponse：回 builtin 但标 network（前端提示「未验证」）。
+        _ => Ok(json!({
+            "models": merge_and_sort_models(vec![], builtin),
+            "source": "network", "error_kind": "network", "upstream_status": res.status
+        })),
     }
 }
 
@@ -1077,7 +1146,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        first_http_url, is_main_list_model, key_fingerprint, parse_host, redact, sandbox_home,
+        first_http_url, is_main_list_model, key_fingerprint, merge_and_sort_models, parse_host,
+        redact, sandbox_home,
     };
 
     #[test]
@@ -1171,5 +1241,26 @@ mod tests {
             h.to_string_lossy().contains(".csswitch"),
             "应在 .csswitch 下：{h:?}"
         );
+    }
+
+    #[test]
+    fn merge_and_sort_prefers_tools_then_dedupes_builtin() {
+        // live 结果 + builtin 兜底：去重（按 id），排序 true>null>false。
+        let live = vec![
+            ("m-notools".to_string(), Some(false)),
+            ("m-tools".to_string(), Some(true)),
+            ("m-unknown".to_string(), None),
+        ];
+        let out = merge_and_sort_models(live, &["m-tools", "m-builtin-only"]);
+        let ids: Vec<String> = out
+            .iter()
+            .map(|v| v.get("id").unwrap().as_str().unwrap().to_string())
+            .collect();
+        // m-tools(true) 最前；false 靠后；builtin-only 去重后附上（作为 null 能力）。
+        assert_eq!(ids[0], "m-tools");
+        assert!(ids.contains(&"m-builtin-only".to_string()));
+        assert_eq!(ids.iter().filter(|i| *i == "m-tools").count(), 1, "去重");
+        // 末位是明确不支持工具的。
+        assert_eq!(ids.last().unwrap(), "m-notools");
     }
 }
