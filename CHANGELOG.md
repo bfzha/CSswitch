@@ -4,6 +4,25 @@
 
 > **约定**：已修问题从 [`docs/known-issues.md`](docs/known-issues.md)「毕业」到这里（发布即定稿）；未修/进行中留在 known-issues；硬 bug 的根因证据链存在 [`findings/`](findings/)。
 
+## [0.3.0-beta.1] — 2026-07-04
+
+> 主题：DeepSeek 工具调用泄漏兜底 shim【端到端接进代理】+ 两处 shim 缺陷修复。**测试版**：兜底能力默认关闭（`off`），本版只把「接通并可显式开启」交付出来供实机验证，不改变普通用户的默认行为；把 rewrite 设为默认开启留待验证后的后续版本。
+
+### 新增 Added
+- **DSML 兜底 shim 真正接进代理（此前是不可达代码）**：DeepSeek 偶发把工具调用泄漏成纯文本 DSML 标记（形如 `<｜｜DSML｜｜tool_calls>…<｜｜DSML｜｜invoke name="…">`），Science 收到后当普通文本、工具无回执，表现为**卡死**（issue #8）。`proxy/dsml_shim.py` 与其测试此前已存在，但 `proxy/csswitch_proxy.py` **从不 import / 调用它**，流式与非流式响应仍逐字透传——绿测只覆盖了孤立模块，真实问题不会被处理。本版把 shim 接进 `_handle_anthropic`，由环境变量 `CSSWITCH_TOOLUSE_SHIM` 选模式：`off`（默认，字节级透传、零回归）/ `detect`（透传 + 遥测本响应是否出现泄漏）/ `rewrite`（把泄漏文本还原成真正的 `tool_use`：流式走状态机、非流式重展开）。仅当请求确有 `tools` 且 provider=deepseek 时介入。新增 `test/test_proxy_dsml_e2e.py`：启动**真实代理子进程**打假上游，端到端证明 rewrite 下「泄漏文本 → tool_use」（流式 + 非流式）、off 下逐字透传。
+
+### 修复 Fixed
+- **SSE 末帧丢失**：`_drain_frames` 的 `flush_tail` 形参此前根本没被使用；上游最后一帧若无尾随空行（EOF 突然），整条 `message_stop` / 末尾 delta 会被静默吞掉（实测输出 `b''`）。现 `finalize()` 时补吐残留末帧。回归测试钉死。
+- **非法布尔参数被臆断成 false**：`_coerce_param` 此前把除 `true/1/yes` 外的任意字符串（如 `maybe`）一律当成 `False` 并通过 schema 校验，可能合成一个参数错误的**真实**工具调用。现只认可 `true/1/yes` 与 `false/0/no`，其余留原字符串交类型校验判非法 → 整块作废（保守：宁可放行为普通文本，绝不臆造工具调用）。回归测试钉死。
+- **rewrite 非流式无泄漏时不逐字 + 遥测误报**（清洁 agent 实机验证发现）：`rewrite_nonstream_body` 此前无条件 `json.dumps` 再序列化，即便响应里没有 DSML 也会破坏逐字（触碰上游不透明字段的编码）并让「字节差 → 已改写」的日志在每条干净响应上误报。现无改动时直接返回上游原字节：既保逐字，也让遥测准确。回归测试钉死。
+
+### 说明 Notes
+- **默认零行为变化**：shim 默认 `off`，普通用户安装后与 0.2.1 表现一致；本版交付的是「能力接通 + 可实机验证」，不代表泄漏问题已对所有用户默认修复。
+- **rewrite 前仍需处理的边界**：把合法的「DSML 示例 / 教学文本」误判为真实工具调用的场景，属阶段二默认开启 rewrite 前尚未关闭的问题，故本版不默认开 rewrite。
+- **铁律零回退**：全程只在「代理 ↔ 上游」层验证，隔离测试不启动 Science，绝不触碰真实 `~/.claude-science` 与端口 8765。
+- **实机验证（隔离层，守铁律不启 Science）**：清洁无上下文 agent 已验证——`off`/`detect` 双向**逐字**透传（零回归）、`rewrite` 端到端把泄漏文本还原成 `tool_use`（流式 + 非流式）；在**真实 DeepSeek** 上，正常工具调用经 shim **无损往返**（原生 `tool_use` 保真、shim 不臆造）。真实泄漏偶发、本轮未复现，故本版不宣称「已对真实流量默认修复」——这正是默认 `off`、`rewrite` 仅供显式验证的原因。
+- 桌面 app（Rust/前端）本版无改动；多 profile 配置管理与代理移 Rust 仍在各自轨道，见 [`docs/known-issues.md`](docs/known-issues.md)。
+
 ## [0.2.1] — 2026-07-03
 
 > 主题：热修「开了 CSSwitch 仍被要求登录」。0.2.0 有两个会导致「流程走完仍落登录页」的缺陷，本版各修一个并各补一条离线回归测试。链路方案本身没坏（代理此前成功处理过真实聊天、虚拟 OAuth 结构自洽），坏的是「重开 / 取入口 URL」路径。
