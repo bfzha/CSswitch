@@ -304,12 +304,50 @@ def fetch_relay_models():
         if not mid:
             continue
         ids.append(mid)
+        # 能力位：从上游 supported_parameters 推断，绝不臆测（无该字段 → None）。
+        sp = m.get("supported_parameters") if isinstance(m, dict) else None
+        supports_tools = ("tools" in sp) if isinstance(sp, list) else None
         out.append({"type": "model", "id": mid,
                     "display_name": (m.get("display_name") if isinstance(m, dict) else None) or mid,
+                    "supports_tools": supports_tools,
                     "created_at": "2026-01-01T00:00:00Z"})
     if ids:
         RELAY_MODELS = ids
     return out
+
+
+def build_models_response():
+    """装配 /v1/models 响应，返回 (状态码, body dict)。协议锁定（修评审 P2-2）：
+      - relay 回源成功 → (200, {data:[…含 supports_tools…]})。
+      - relay 回源 HTTPError → (上游同状态码, {error_kind:"upstream", upstream_status, message})，
+        绝不吞成 200+静态（否则掩盖坏 key）。builtin 兜底交 Rust 命令决定。
+      - relay 网络异常 → (502, {error_kind:"network", upstream_status:None, message})。
+      - 非 relay（无 models_url，deepseek/qwen）→ (200, {静态选择器列表})，行为不变。"""
+    if PROV.get("models_url"):
+        try:
+            data = fetch_relay_models()
+            log(f"GET /v1/models -> {PROV_NAME}(回源): {len(data)} 个模型")
+            return 200, {"data": data, "has_more": False,
+                         "first_id": data[0]["id"] if data else None,
+                         "last_id": data[-1]["id"] if data else None}
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                pass
+            log(f"GET /v1/models -> {PROV_NAME} 回源 HTTP {e.code}（保留状态码，不回静态）")
+            return e.code, {"error_kind": "upstream", "upstream_status": e.code,
+                            "message": f"upstream {e.code}: {detail}"}
+        except Exception as e:
+            log(f"GET /v1/models -> {PROV_NAME} 回源网络异常，本地回 502: {e}")
+            return 502, {"error_kind": "network", "upstream_status": None, "message": str(e)}
+    # 非 relay：静态选择器列表（deepseek/qwen）。
+    data = [{"type": "model", "id": mid, "display_name": disp, "supports_tools": None,
+             "created_at": "2026-01-01T00:00:00Z"} for mid, disp in PROV["models"]]
+    return 200, {"data": data, "has_more": False,
+                 "first_id": data[0]["id"] if data else None,
+                 "last_id": data[-1]["id"] if data else None}
 
 
 # ---------- Anthropic -> OpenAI 翻译（qwen 路径） ----------
@@ -466,21 +504,8 @@ class H(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         if self.path.startswith("/v1/models"):
-            # relay：回源直拉中转站真实模型（拉不到退回静态 PROV["models"]，relay 为空则空列表）。
-            data = None
-            if PROV.get("models_url"):
-                try:
-                    data = fetch_relay_models()
-                    log(f"GET /v1/models -> {PROV_NAME}(回源): {len(data)} 个模型")
-                except Exception as e:
-                    log(f"GET /v1/models -> {PROV_NAME} 回源失败，退回静态: {e}")
-            if data is None:
-                data = [{"type": "model", "id": mid, "display_name": disp,
-                         "created_at": "2026-01-01T00:00:00Z"} for mid, disp in PROV["models"]]
-                log(f"GET /v1/models -> {PROV_NAME}: {', '.join(m[0] for m in PROV['models'])}")
-            self._send_json(200, {"data": data, "has_more": False,
-                                  "first_id": data[0]["id"] if data else None,
-                                  "last_id": data[-1]["id"] if data else None})
+            code, body = build_models_response()
+            self._send_json(code, body)
         elif self.path.startswith("/health"):
             self._send_json(200, {"status": "ok", "provider": PROV_NAME})
         else:

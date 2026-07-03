@@ -146,6 +146,64 @@ class RelayProvider(unittest.TestCase):
         self.assertEqual(out[0]["display_name"], "claude-opus-4-8")
         self.assertEqual(cs.RELAY_MODELS, ["claude-opus-4-8", "claude-3-5-sonnet-20241022"])
 
+    def test_models_carry_supports_tools_from_supported_parameters(self):
+        orig = cs.http_get_json
+        cs.http_get_json = lambda url, headers: {"data": [
+            {"id": "glm-4.6", "supported_parameters": ["tools", "temperature"]},  # 含 tools → True
+            {"id": "glm-lite", "supported_parameters": ["temperature"]},          # 有字段无 tools → False
+            {"id": "glm-x"},                                                        # 无字段 → None（不臆测）
+        ]}
+        try:
+            out = cs.fetch_relay_models()
+        finally:
+            cs.http_get_json = orig
+        got = {m["id"]: m["supports_tools"] for m in out}
+        self.assertEqual(got, {"glm-4.6": True, "glm-lite": False, "glm-x": None})
+
+    def test_build_models_response_success(self):
+        orig = cs.http_get_json
+        cs.http_get_json = lambda url, headers: {"data": [{"id": "glm-4.6"}]}
+        try:
+            code, body = cs.build_models_response()
+        finally:
+            cs.http_get_json = orig
+        self.assertEqual(code, 200)
+        self.assertEqual([m["id"] for m in body["data"]], ["glm-4.6"])
+
+    def test_build_models_response_preserves_upstream_status(self):
+        import urllib.error, io
+        def boom(url, headers):
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b"nope"))
+        orig = cs.http_get_json
+        cs.http_get_json = boom
+        try:
+            code, body = cs.build_models_response()
+        finally:
+            cs.http_get_json = orig
+        self.assertEqual(code, 401)                    # 不再吞成 200 + 静态
+        self.assertEqual(body["upstream_status"], 401)
+        self.assertNotIn("data", body)                 # 失败不回静态列表
+
+    def test_build_models_response_network_error_502(self):
+        def boom(url, headers):
+            raise ConnectionError("dns fail")
+        orig = cs.http_get_json
+        cs.http_get_json = boom
+        try:
+            code, body = cs.build_models_response()
+        finally:
+            cs.http_get_json = orig
+        self.assertEqual(code, 502)
+        self.assertEqual(body["error_kind"], "network")
+
+    def test_build_models_response_non_relay_returns_static(self):
+        # deepseek/qwen（无 models_url）→ 仍回静态选择器列表，行为不变。
+        cs.PROV = cs.PROVIDERS["deepseek"]
+        code, body = cs.build_models_response()
+        self.assertEqual(code, 200)
+        ids = [m["id"] for m in body["data"]]
+        self.assertIn("claude-opus-4-8", ids)
+
 
 if __name__ == "__main__":
     unittest.main()
