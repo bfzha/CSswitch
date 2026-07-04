@@ -1,0 +1,25 @@
+{
+  "productName": "CSSwitch Acceptance",
+  "identifier": "com.csswitch.acceptance",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CSSwitch Acceptance",
+        "width": 340,
+        "height": 560,
+        "minWidth": 320,
+        "minHeight": 520,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "visible": true,
+        "center": true,
+        "focus": true
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["app"]
+  }
+}

@@ -96,57 +96,116 @@
       </div>
 
       <div class="sec official-only">
-        <div class="hint">官方模式：用你自己真实的 Claude Science 与订阅。CSSwitch 不插手你的官方登录、也不起代理/沙箱，只把你交回官方客户端。</div>
+        <div class="hint">官方模式：用你自己真实的 Claude Science 与订阅，本工具不插手你的官方登录。</div>
       </div>
 
-      <div class="sec tp-only">
-        <label>模型 / Provider</label>
-        <select id="provider">
-          <option value="deepseek">DeepSeek（原生 Anthropic 端点）</option>
-          <option value="qwen">通义千问 Qwen（DashScope 翻译）</option>
-        </select>
-      </div>
-
-      <div class="sec tp-only">
-        <label id="keyLabel">DeepSeek API Key</label>
-        <div class="row">
-          <input id="keyInput" type="password" placeholder="粘贴第三方 key（只存本地）" autocomplete="off" spellcheck="false" />
-          <button class="btn small" id="saveKeyBtn">保存</button>
+      <!-- 配置列表：全部已存配置一屏可见（图标/名/类别/地址/模型/掩码 key/生效标记） -->
+      <div class="sec tp-only" id="listSec">
+        <div class="listhd">
+          <label>我的配置</label>
+          <button class="btn small" id="newBtn">＋ 新建</button>
         </div>
-        <div class="hint">存本地 <code>~/.csswitch/config.json</code>（0600）；面板只回显末 4 位。</div>
+        <div id="profileList"></div>
+        <button class="btn small" id="skipActivateBtn" hidden style="margin-top:8px;width:100%">校验没过，仍要启用这条</button>
       </div>
 
-      <details class="sec adv tp-only">
+      <!-- 新建向导：选模板 → 预填 → 填 key → 创建（不自动生效） -->
+      <div class="sec tp-only" id="wizSec" hidden>
+        <label id="wizTplLabel">选择来源</label>
+        <div id="wizTemplateChips" class="chips" role="group" aria-labelledby="wizTplLabel"></div>
+        <input id="wizTemplate" type="hidden" />
+        <div class="hint" id="wizTplHint"></div>
+        <label style="margin-top:10px" for="wizName">名称</label>
+        <input id="wizName" type="text" placeholder="给这套配置起个名字" autocomplete="off" spellcheck="false" />
+        <label style="margin-top:10px" for="wizBase">地址 base_url</label>
+        <div class="row">
+          <input id="wizBase" type="text" placeholder="https://your-relay/claude" autocomplete="off" spellcheck="false" />
+          <button class="btn small" id="wizFetchBtn">获取模型</button>
+        </div>
+        <div class="hint" id="wizBaseHint"></div>
+        <label style="margin-top:10px" id="wizModelLabel">模型</label>
+        <div id="wizModelInfo" class="modelinfo" hidden></div>
+        <input id="wizModel" list="wizModelList" aria-labelledby="wizModelLabel" autocomplete="off" spellcheck="false" />
+        <datalist id="wizModelList"></datalist>
+        <div class="hint" id="wizModelHint"></div>
+        <label style="margin-top:10px" for="wizKey">API Key / Token</label>
+        <input id="wizKey" type="password" placeholder="粘贴 key（只存本地）" autocomplete="off" spellcheck="false" />
+        <div class="hint">只存本地，不上传给 CSSwitch；使用时才作为鉴权发给你选的服务商。面板只回显末 4 位。</div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn small" id="wizSaveBtn">创建</button>
+          <button class="btn small" id="wizCancelBtn">取消</button>
+        </div>
+      </div>
+
+      <!-- 连接编辑（base_url/model/key）：编辑生效条会走「校验→切换」事务 -->
+      <div class="sec tp-only" id="connSec" hidden>
+        <label id="connTitle">编辑连接</label>
+        <label style="margin-top:6px" for="connBase">地址 base_url</label>
+        <div class="row">
+          <input id="connBase" type="text" autocomplete="off" spellcheck="false" />
+          <button class="btn small" id="connFetchBtn">获取模型</button>
+        </div>
+        <div class="hint" id="connBaseHint"></div>
+        <label style="margin-top:10px" id="connModelLabel">模型</label>
+        <div id="connModelInfo" class="modelinfo" hidden></div>
+        <input id="connModel" list="connModelList" aria-labelledby="connModelLabel" autocomplete="off" spellcheck="false" />
+        <datalist id="connModelList"></datalist>
+        <div class="hint" id="connModelHint"></div>
+        <label style="margin-top:10px" for="connKey">API Key / Token</label>
+        <input id="connKey" type="password" autocomplete="off" spellcheck="false" />
+        <div class="hint">留空＝不改；要清除请点「清除 key」。</div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn small" id="connSaveBtn">保存连接</button>
+          <button class="btn small" id="connClearBtn">清除 key</button>
+          <button class="btn small" id="connCancelBtn">取消</button>
+        </div>
+      </div>
+
+      <!-- 改名 / 备注：就地改元数据，不触发代理 -->
+      <div class="sec tp-only" id="metaSec" hidden>
+        <label for="metaName">名称</label>
+        <input id="metaName" type="text" autocomplete="off" spellcheck="false" />
+        <label style="margin-top:10px" for="metaNotes">备注（可选）</label>
+        <input id="metaNotes" type="text" autocomplete="off" spellcheck="false" />
+        <div class="row" style="margin-top:12px">
+          <button class="btn small" id="metaSaveBtn">保存</button>
+          <button class="btn small" id="metaCancelBtn">取消</button>
+        </div>
+      </div>
+
+      <details class="sec adv tp-only" id="advSec">
         <summary>高级设置</summary>
         <div class="ports">
-          <div class="fld"><label>代理端口</label><input id="proxyPort" inputmode="numeric" value="18991" /></div>
-          <div class="fld"><label>沙箱端口</label><input id="sandboxPort" inputmode="numeric" value="8990" /></div>
+          <div class="fld"><label for="proxyPort">代理端口</label><input id="proxyPort" inputmode="numeric" value="18991" /></div>
+          <div class="fld"><label for="sandboxPort">沙箱端口</label><input id="sandboxPort" inputmode="numeric" value="8990" /></div>
         </div>
       </details>
 
-      <div class="sec">
+      <!-- 反馈消息：有真实反馈（表单错误 / 回滚 / 保存结果 / 自检）才显示，空闲不占位。 -->
+      <div class="sec feedback" hidden>
+        <div class="msg" id="msg" role="status" aria-live="polite"></div>
+      </div>
+
+      <!-- 运行控制区 + 状态灯：仅列表视图显示（表单视图由 .view-form 隐藏）。 -->
+      <div class="sec list-only">
         <button class="hero" id="oneClickBtn">⚡ 一键开始</button>
         <div class="subbtns">
           <button class="btn" id="stopBtn">全部停止</button>
         </div>
-      </div>
-
-      <div class="sec">
-        <div class="status tp-only">
+        <div class="status tp-only" style="margin-top:10px">
           <div class="st"><span id="ltProxy" class="lt a"></span>代理</div>
           <div class="st"><span id="ltSandbox" class="lt a"></span>沙箱</div>
           <div class="st"><span id="ltUpstream" class="lt a"></span>上游</div>
         </div>
-        <div class="msg" id="msg">就绪。</div>
       </div>
 
-      <div class="foot">
-        <span class="link" id="openBrowserBtn">打开浏览器面板 ↗</span>
-        <span class="link" id="reportBtn">反馈 / 报 bug</span>
+      <div class="foot list-only">
+        <button type="button" class="link linkbtn" id="openBrowserBtn">打开浏览器面板 ↗</button>
+        <button type="button" class="link linkbtn" id="reportBtn">反馈 / 报 bug</button>
       </div>
-      <div class="foot foot2">
-        <span><span class="link" id="doctorBtn">自检</span> · <span class="link" id="logsBtn">日志</span></span>
-        <span><span class="link" id="updateBtn">检查更新</span> · <span id="verLabel"></span></span>
+      <div class="foot foot2 list-only">
+        <span><button type="button" class="link linkbtn" id="doctorBtn">自检</button> · <button type="button" class="link linkbtn" id="logsBtn">日志</button></span>
+        <span><button type="button" class="link linkbtn" id="updateBtn">检查更新</button> · <span id="verLabel"></span></span>
       </div>
     </div>
   </body>

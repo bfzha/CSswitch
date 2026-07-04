@@ -25,6 +25,10 @@ body{
 .official-only{display:none}
 .panel.mode-official .tp-only{display:none}
 .panel.mode-official .official-only{display:block}
+/* 中转站(relay)专属区块：仅在「第三方模式 且 provider=relay」时显示（由 JS 加 show-relay 类，
+   已保证不与官方模式并存，故不必与 mode-official 抢 CSS 优先级） */
+.relay-only{display:none}
+.panel.show-relay .relay-only{display:block}
 .brand{display:flex;align-items:center;gap:8px;font-weight:650;font-size:14px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(47,191,113,.16)}
 .dot.amber{background:var(--amber);box-shadow:0 0 0 3px rgba(230,162,60,.16)}
@@ -79,6 +83,53 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
 .adv summary::before{content:"▸";font-size:9px;margin-right:5px;display:inline-block}
 .adv[open] summary::before{content:"▾"}
 .adv .ports{margin-top:9px}
+/* 模型来源提示（内置/未验证）用次要色，工具能力标注已在 option 文本里。 */
+#wizModelHint,#connModelHint{color:var(--sub)}
+/* profile 列表：每条已存配置一屏可见（图标/名/类别徽标/地址/模型/掩码 key/生效标记） */
+.listhd{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.listhd label{margin:0}
+#profileList{margin-top:8px;max-height:290px;overflow:auto;display:flex;flex-direction:column;gap:8px}
+.empty{font-size:12px;color:var(--sub);padding:16px 10px;text-align:center;
+  border:1px dashed var(--line);border-radius:10px;line-height:1.6}
+.prow{border:1px solid var(--line);border-radius:11px;padding:9px 10px;background:var(--field)}
+.prow.pactive{border-color:var(--accent);box-shadow:0 0 0 2px rgba(194,90,52,.12)}
+.prow-top{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.pico{width:9px;height:9px;border-radius:50%;background:var(--sub);flex:none}
+.pname{font-size:13px;font-weight:650;color:var(--ink)}
+.badge{font-size:10px;color:var(--sub);border:1px solid var(--line);border-radius:6px;
+  padding:1px 5px;background:var(--panel)}
+.badge.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+.pmeta{font-size:10.5px;color:var(--sub);margin-top:4px;word-break:break-all;overflow-wrap:anywhere;line-height:1.5}
+.prow-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.abtn{height:26px;border-radius:7px;border:1px solid var(--line);background:var(--panel);
+  color:var(--ink);font-size:11px;font-weight:600;cursor:pointer;padding:0 9px;font-family:inherit}
+.abtn:hover{border-color:var(--accent)}
+.abtn:active{transform:translateY(1px)}
+.abtn.prim{background:var(--accent);color:#fff;border-color:var(--accent)}
+.abtn.danger:hover{border-color:var(--red);color:var(--red)}
+/* 表单视图（向导/连接/改名）隐藏运行控制区与页脚；反馈消息区 .feedback 始终可见（P1-3）。 */
+.panel.view-form .list-only{display:none}
+.feedback{border-top:1px solid var(--line)}
+/* 模板选择 chip 网格（对齐 CC Switch；替代下拉）。 */
+.chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:2px}
+.chip{display:flex;align-items:center;gap:7px;padding:9px 10px;border:1px solid var(--line);
+  border-radius:10px;background:var(--field);color:var(--ink);cursor:pointer;font-family:inherit;
+  font-size:12.5px;font-weight:600;text-align:left}
+.chip:hover{border-color:var(--accent)}
+.chip.sel{border-color:var(--accent);background:var(--panel);box-shadow:0 0 0 2px rgba(194,90,52,.14)}
+.chip-dot{width:9px;height:9px;border-radius:50%;background:var(--sub);flex:none}
+.chip-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip-cat{font-size:10px;color:var(--sub);border:1px solid var(--line);border-radius:6px;
+  padding:1px 5px;background:var(--panel)}
+/* 模型只读信息（native 映射说明，替代下拉）。 */
+.modelinfo{font-size:11.5px;color:var(--ink);background:var(--field);border:1px solid var(--line);
+  border-radius:9px;padding:8px 10px;line-height:1.5}
+/* 页脚链接按钮：外观仍似链接，但天然键盘可达。 */
+.linkbtn{border:none;background:none;padding:0;font:inherit;cursor:pointer}
+/* 键盘可见焦点（a11y）。 */
+.btn:focus-visible,.hero:focus-visible,.chip:focus-visible,.abtn:focus-visible,
+.seg-btn:focus-visible,input:focus-visible,select:focus-visible,.link:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px}
 
 /* ---- 远程服务器管理 ---- */
 .remote-only{display:none !important}
@@ -89,7 +140,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
 }
 .panel.target-remote .local-only{display:none !important}
 
-/* Profile 列表项 */
+/* 远程 Profile 列表项 */
 .profile-item{display:flex;align-items:center;justify-content:space-between;
   padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:6px;
   font-size:12px}
@@ -118,3 +169,12 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
 /* 连接状态动画 */
 .pulsing{animation:pulse 1.5s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Toast 通知 */
+.toast{position:fixed;top:20px;right:20px;z-index:200;padding:10px 16px;
+  border-radius:8px;font-size:12.5px;color:#fff;opacity:0;transition:opacity .3s;
+  pointer-events:none;max-width:280px;word-break:break-all}
+.toast.show{opacity:1}
+.toast-info{background:var(--accent)}
+.toast-error{background:var(--red)}
+.toast-ok{background:var(--green)}

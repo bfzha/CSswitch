@@ -20,7 +20,12 @@
 ## 二、代理与整链
 
 4. **翻译代理 ↔ 真实通义千问整条链路已跑通**（`proxy/qwen_proxy.py`，隔离环境，未碰 Science/OAuth/CC Switch）：`/v1/models`、非流式、流式 SSE、tool_use 发起、tool_result 回喂后接着作答全部通过；入站 OAuth Bearer 逐条确认被剥离。证据 `findings/e2e-proxy-qwen-proof.log`。
-5. **CC Switch 的代理本身就是完整翻译器**：二进制含 `/v1/messages`、`/v1/chat/completions`、`cc_switch_transform_error`、两套协议字段与 SSE 桥接，内建模型目录含 DeepSeek/Qwen/Kimi。端口默认 `127.0.0.1:15721`，`proxy_config` 的 `app_type` 只允许 `claude/codex/gemini`（Science 复用 `claude`）。
+5. **CC Switch 的代理是完整翻译器，但不能当独立 sidecar 复用**（2026-07-03 读 v3.16.5 源码复核，farion1231/cc-switch，**MIT**）：
+   - 早期二进制观察（留存）：含 `/v1/messages`、`/v1/chat/completions`、`cc_switch_transform_error`、两套协议字段与 SSE 桥接，内建模型目录含 DeepSeek/Qwen/Kimi；端口默认 `127.0.0.1:15721`。
+   - **无 headless / CLI / 独立二进制**：代理只在它 Tauri GUI 进程内跑，构造即绑死它的 SQLite `Database`（`ProxyServer::new(config, Arc<Database>, Option<tauri::AppHandle>)`），每个请求都查该 DB 选 provider。**没有可 spawn 的 sidecar**，`ANTHROPIC_BASE_URL` 无处可指，除非把它整个 app 一起打包。
+   - **翻译契合度极高**：`forwarder.rs` 对入站 `authorization/x-api-key/x-goog-api-key` 一律丢弃、换成 adapter 提供的上游鉴权头（`AuthStrategy`：Anthropic→x-api-key / Bearer / Google→x-goog-api-key / OAuth），正是我们「丢弃 Science 虚拟 OAuth、注入第三方 key」所需；`providers/transform*.rs` 双向 Anthropic↔OpenAI/Responses/Gemini，含 SSE + tool_use/tool_result。
+   - **两个缺口**：① 入站**无鉴权**（无 path-secret，仅靠 bind localhost）→ 复用要自己加门；② 配置**存 SQLite、非配置文件**（provider 行 + `apiFormat` 字段 `anthropic|openai_chat|openai_responses|gemini_native`，由 GUI/IPC 灌），不是我们能直接写的文件。
+   - **结论**：复用 = 把它的 MIT `transform*.rs` 等翻译模块**移植/vendor 进我们自己的（Rust）代理**当参考实现，不是插它的二进制。license MIT（署名即可），但仓库周更（v3.16.5、~2050 commits），fork 有持续跟进成本。证据：本会话 general-purpose 研究 agent（引用 `src-tauri/src/proxy/*`）。
 6. **DeepSeek 接入（默认上游，2026-07-02）**：主代理 `proxy/csswitch_proxy.py`，provider 可切（`--provider deepseek|qwen`）。
    - DeepSeek 走**原生 Anthropic 端点** `https://api.deepseek.com/anthropic/v1/messages`，鉴权头 `x-api-key`，代理只「改模型名 + 换鉴权 + 归一化 thinking + 夹 max_tokens + 重试」，**不翻译协议** → thinking/tool_use 原生保真。
    - 模型：`claude-opus-4-8→deepseek-v4-pro`、`claude-haiku/sonnet→deepseek-v4-flash`。
@@ -42,5 +47,5 @@
 ## 四、其它
 
 - Qwen(DashScope) 为 OpenAI-兼容备选（`--provider qwen`，翻译路径）；`proxy/qwen_proxy.py` 是其早期单 provider 版，已被 `csswitch_proxy.py` 取代。
-- 待决：最终用自研 `qwen_proxy.py`（透明可控）还是复用 CC Switch 内建代理（覆盖面广）。
+- **已决（2026-07-03）**：CC Switch 代理不能当 sidecar 直接复用（见事实 5）。方向 = 自研代理移 Rust（axum）+ vendor CC Switch 的 MIT 翻译模块拿广覆盖（治本 python-ectomy）。这条独立于「配置层多 profile 化」，各走节奏。见 `known-issues.md` #8。
 - DashScope 兼容端点：`https://dashscope.aliyuncs.com/compatible-mode/v1`。DashScope 偶发连接抖动（SSL EOF `_ssl.c:1129`/握手超时），代理已加连接级重试（4 次退避，仅重试连接错误）。

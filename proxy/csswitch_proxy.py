@@ -6,6 +6,9 @@ Providers:
                    代理只做「透传 + 改模型名 + 换鉴权头 + max_tokens 夹取 + 连接重试」，
                    thinking/tool_use 全部原生保真（不翻译协议）。
   qwen           ：DashScope compatible-mode —— Anthropic↔OpenAI 双向翻译（流式以 SSE 回放保真 tool_use）。
+  relay          ：任意「中转站」（Anthropic 兼容端点，base_url + token）。原生透传、【不重映射模型】，
+                   /v1/models 回源直拉让 Science 选择器自动铺满中转站真实模型。base_url 经
+                   CSSWITCH_RELAY_BASE_URL 提供、token 经 CSSWITCH_RELAY_KEY 提供。
 
 安全约束：
   - 入站 Authorization / x-api-key（Science 带来的 OAuth Bearer）一律剥离，不记录、不转发。
@@ -28,10 +31,17 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import dsml_shim
+
+# DSML 兜底 shim 的运行模式：off（默认，字节级透传）/ detect（透传 + 遥测）/ rewrite（改写）。
+# 由 __main__ 依 shim_mode(PROV_NAME, PROV) 覆写（读环境变量 CSSWITCH_TOOLUSE_SHIM）。
+SHIM_MODE = "off"
+
 # ---------- provider 注册表 ----------
 PROVIDERS = {
     "deepseek": {
         "mode": "anthropic",
+        "dsml_capable": True,   # 只有 DeepSeek 打开 DSML 兜底 shim（relay 需显式确认）
         "url": "https://api.deepseek.com/anthropic/v1/messages",
         "key_env": "DEEPSEEK_API_KEY",
         # 选择器里展示的可选模型。
@@ -86,6 +96,23 @@ PROVIDERS = {
         "default_cap": 8192,
         "default_model": "qwen-plus",
     },
+    "relay": {
+        # 「中转站」：任意 Anthropic 兼容端点（base_url + token）。原生透传、【不重映射模型】
+        # ——中转站原生认 claude-* 名。上游 url / models_url 在 __main__ 里按 CSSWITCH_RELAY_BASE_URL
+        # 装配（base + /v1/messages、base + /v1/models）。
+        "mode": "anthropic",       # 复用原生透传 handler（流式/非流式/重试都现成）
+        "url": None,               # __main__ 装配
+        "models_url": None,        # __main__ 装配；存在即 /v1/models 回源直拉
+        "key_env": "CSSWITCH_RELAY_KEY",
+        "passthrough": True,       # resolve_model 原样透传模型名（不映射）
+        "auth_style": "both",      # 同时带 x-api-key + Authorization: Bearer（最大兼容各家中转站）
+        "models": [],              # 回源拉取，静态为空
+        "model_map": {},
+        "model_caps": {},
+        "default_cap": None,       # 不夹 max_tokens：尊重中转站真实（claude 原生）上限
+        # 空名兜底：Science 硬编码的默认推理模型 id（中转站基本都提供）。
+        "default_model": "claude-opus-4-8",
+    },
 }
 
 PROV = None      # 当前 provider 配置（dict），运行时设定
@@ -94,6 +121,19 @@ LOG = None
 PROV_NAME = None  # 运行时设定；模块被 import 做测试时也要有定义，避免 handler NameError
 AUTH_SECRET = None  # 未设则不启用鉴权（保持旧行为）
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
+# relay 模式：最近一次 /v1/models 回源拉到的上游模型 id 列表。resolve_model 用它把
+# Science 发来的裸 id（如标题 agent 的 claude-haiku-4-5）贴合到中转站真实 id
+# （如 claude-haiku-4-5-20251001）。首拉前为空 → 纯透传。
+RELAY_MODELS = []
+# relay 强制模型 override：面板选了模型时，代理无条件把所有请求模型改成它（覆盖透传）。
+# 由 CSSWITCH_RELAY_MODEL 环境变量在 __main__ 里装配；留空 → None → 维持 PR #4 透传。
+RELAY_FORCE_MODEL = None
+# relay thinking 策略（来自模板 thinking_policy）：由 CSSWITCH_RELAY_THINKING 在 __main__ 装配。
+# None/"adaptive" → auto→adaptive（现状，如 MiniMax）；"enabled" → 强制 enabled（如 Kimi）。
+RELAY_THINKING = None
+# 出站 User-Agent：部分中转站的 WAF 把默认的 "Python-urllib/x.y" 判为 bot 直接 403
+# （byteswarm 实测），故所有上游请求统一带一个非 bot 的 UA。
+UPSTREAM_UA = "CSSwitch/0.2 (+https://github.com/SuperJJ007/CSSwitch)"
 
 # ---------- #3: targeted fast-fail（沙箱「Switching organization」卡死修复） ----------
 # 沙箱 Science 启动时会对 claude.ai/api/oauth/profile 发【阻塞式】请求解析组织；
@@ -139,11 +179,27 @@ def load_key(prov, args):
     return None
 
 
+def _snap_relay_model(name):
+    """relay 透传：把请求模型贴合到中转站真实 id。精确命中优先；否则找一个以
+    请求名为前缀的上游 id（裸 claude-haiku-4-5 → claude-haiku-4-5-20251001）；
+    都不中就原样返回（中转站自行处理别名 / 报错）。"""
+    if not RELAY_MODELS or name in RELAY_MODELS:
+        return name
+    for mid in RELAY_MODELS:
+        if mid.startswith(name + "-") or mid == name:
+            return mid
+    return name
+
+
 def resolve_model(name):
     """把 Science 传来的模型名解析成当前 provider 的目标模型。
-    优先：选择器里选中的 provider 原生名 > 显式映射 > 去日期后缀 > 前缀匹配 > 默认。"""
+    优先：relay 强制模型 override > 选择器选中名 > 显式映射 > 去日期后缀 > 前缀匹配 > 默认。"""
+    if PROV.get("passthrough") and RELAY_FORCE_MODEL:
+        return RELAY_FORCE_MODEL   # relay 选了模型：强制覆盖一切（含裸 claude-* 与空名）
     if not name:
         return PROV["default_model"]
+    if PROV.get("passthrough"):   # relay 留空：中转站原生认 claude-*，透传（仅贴合到真实 id）
+        return _snap_relay_model(name)
     mm = PROV["model_map"]
     if name in mm:          # 先查映射（覆盖伪 claude- 前缀的选择器 id 和 Science 硬编码 claude-*）
         return mm[name]
@@ -159,6 +215,46 @@ def resolve_model(name):
     return PROV["default_model"]
 
 
+def _enabled_budget(max_tokens):
+    """thinking:enabled 需 budget_tokens，且必须 < max_tokens（留 token 给输出）。
+    默认 1024，按 max_tokens 收敛，最低 1（Kimi 真机接受小 budget）。"""
+    default = 1024
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        return max(1, min(default, max_tokens - 1))
+    return default
+
+
+def normalize_thinking(body, prov_name, relay_thinking=None):
+    """thinking 归一化（纯函数，便于测试）。按 provider + relay 策略处理
+    （spec v3 §3.1，真机 §3.5 修正为 per-provider）：
+      (A) 强制 tool_choice(any/tool) 时关 thinking——【仅 deepseek】：flash 默认开思考，
+          即便 thinking=null 也与强制工具冲突，故无条件置 disabled。
+      (B) relay 的 thinking 策略（relay_thinking，来自模板 thinking_policy，
+          经 CSSWITCH_RELAY_THINKING 注入）：
+          - "enabled"（如 Kimi：模型强制 thinking.type=enabled，缺失/auto/其它都 400）
+            → 归一成 {type:enabled, budget_tokens}（保留已有的 enabled）。
+          - "adaptive"/None（默认，如 MiniMax 及 glm/xiaomi/…）→ auto→adaptive（上游认 adaptive）。
+      (C) deepseek 非强制 + auto → adaptive（DeepSeek 认 adaptive）。
+    原地修改并返回 body。"""
+    tc = body.get("tool_choice")
+    forcing = isinstance(tc, dict) and tc.get("type") in ("any", "tool")
+    if forcing and prov_name == "deepseek":
+        body["thinking"] = {"type": "disabled"}
+        return body
+    if prov_name == "relay" and relay_thinking == "enabled":
+        th = body.get("thinking")
+        if not (isinstance(th, dict) and th.get("type") == "enabled"):
+            body["thinking"] = {"type": "enabled",
+                                "budget_tokens": _enabled_budget(body.get("max_tokens"))}
+        return body
+    th = body.get("thinking")
+    if isinstance(th, dict) and th.get("type") == "auto":
+        th = dict(th)
+        th["type"] = "adaptive"
+        body["thinking"] = th
+    return body
+
+
 def clamp_max_tokens(v, model=None):
     if not v:
         return v
@@ -172,6 +268,7 @@ def clamp_max_tokens(v, model=None):
 def http_post(url, data, headers, attempts=4, timeout=300):
     """POST 上游；重试覆盖【连接 + 完整读体】（含 SSL EOF、握手超时、对端断开、IncompleteRead），
     对服务端明确响应（HTTPError，如 400）不重试。返回 (body_bytes, content_type)。"""
+    headers = {"User-Agent": UPSTREAM_UA, **headers}
     for i in range(attempts):
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
@@ -190,6 +287,7 @@ def http_post(url, data, headers, attempts=4, timeout=300):
 def open_stream(url, data, headers, attempts=4, timeout=300):
     """打开上游流式连接并预读首块（把「200 但立刻空体」这种抖动也纳入重试）。
     返回 (resp, first_chunk, content_type)；首字节到手后不再重试。"""
+    headers = {"User-Agent": UPSTREAM_UA, **headers}
     for i in range(attempts):
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
@@ -207,6 +305,109 @@ def open_stream(url, data, headers, attempts=4, timeout=300):
                 time.sleep(0.8 * (i + 1))
                 continue
             raise
+
+
+def http_get_json(url, headers, attempts=3, timeout=30):
+    """GET 上游并解析 JSON（relay 回源拉 /v1/models 用）。连接抖动重试，服务端明确响应不重试。"""
+    headers = {"User-Agent": UPSTREAM_UA, **headers}
+    for i in range(attempts):
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError:
+            raise
+        except Exception as e:
+            if i < attempts - 1:
+                log(f"  ~ 上游连接抖动，重试 {i + 1}/{attempts - 1}: {e}")
+                time.sleep(0.6 * (i + 1))
+                continue
+            raise
+
+
+def _upstream_auth_headers():
+    """上游鉴权头：按当前 provider 的 auth_style 装 x-api-key / bearer / both。
+    deepseek 未设 → 默认 x-api-key（保持原状）；relay = both。"""
+    style = PROV.get("auth_style", "x-api-key")
+    h = {}
+    if style in ("x-api-key", "both"):
+        h["x-api-key"] = KEY
+    if style in ("bearer", "both"):
+        h["Authorization"] = f"Bearer {KEY}"
+    return h
+
+
+def fetch_relay_models():
+    """回源拉中转站 /v1/models，归一化成 Science 认的 Anthropic 模型列表，并刷新
+    RELAY_MODELS 缓存（供 resolve_model 贴合）。返回归一化后的 list（可空）。"""
+    global RELAY_MODELS
+    murl = PROV.get("models_url")
+    if not murl:
+        return []
+    headers = dict(_upstream_auth_headers())
+    headers["anthropic-version"] = "2023-06-01"
+    raw = http_get_json(murl, headers)
+    data = raw.get("data") if isinstance(raw, dict) else raw
+    out, ids = [], []
+    for m in data or []:
+        mid = m.get("id") if isinstance(m, dict) else None
+        if not mid:
+            continue
+        ids.append(mid)
+        # 能力位：从上游 supported_parameters 推断，绝不臆测（无该字段 → None）。
+        sp = m.get("supported_parameters") if isinstance(m, dict) else None
+        supports_tools = ("tools" in sp) if isinstance(sp, list) else None
+        out.append({"type": "model", "id": mid,
+                    "display_name": (m.get("display_name") if isinstance(m, dict) else None) or mid,
+                    "supports_tools": supports_tools,
+                    "created_at": "2026-01-01T00:00:00Z"})
+    if ids:
+        RELAY_MODELS = ids
+    return out
+
+
+def build_models_response():
+    """装配 /v1/models 响应，返回 (状态码, body dict)。协议锁定（修评审 P2-2）：
+      - relay 回源成功 → (200, {data:[…含 supports_tools…]})。
+      - relay 回源 HTTPError → (上游同状态码, {error_kind:"upstream", upstream_status, message})，
+        绝不吞成 200+静态（否则掩盖坏 key）。builtin 兜底交 Rust 命令决定。
+      - relay 网络异常 → (502, {error_kind:"network", upstream_status:None, message})。
+      - 非 relay（无 models_url，deepseek/qwen）→ (200, {静态选择器列表})，行为不变。"""
+    if PROV.get("models_url"):
+        if RELAY_FORCE_MODEL:
+            # force（Science 常驻代理）：只返回一个壳，Science 主列表显示真实模型名。
+            # 出站由 resolve_model 的 force 分支覆盖，无需 model_map。app 的 fetch_models
+            # 不设 RELAY_FORCE_MODEL，故仍走下面回源拿真实 id 供用户选（两个消费者切分）。
+            shell = [{"type": "model", "id": "claude-opus-4-8",
+                      "display_name": RELAY_FORCE_MODEL, "supports_tools": None,
+                      "created_at": "2026-01-01T00:00:00Z"}]
+            log(f"GET /v1/models -> {PROV_NAME}(force 借壳): {RELAY_FORCE_MODEL}")
+            return 200, {"data": shell, "has_more": False,
+                         "first_id": "claude-opus-4-8", "last_id": "claude-opus-4-8"}
+        try:
+            data = fetch_relay_models()
+            log(f"GET /v1/models -> {PROV_NAME}(回源): {len(data)} 个模型")
+            return 200, {"data": data, "has_more": False,
+                         "first_id": data[0]["id"] if data else None,
+                         "last_id": data[-1]["id"] if data else None}
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                pass
+            log(f"GET /v1/models -> {PROV_NAME} 回源 HTTP {e.code}（保留状态码，不回静态）")
+            return e.code, {"error_kind": "upstream", "upstream_status": e.code,
+                            "message": f"upstream {e.code}: {detail}"}
+        except Exception as e:
+            log(f"GET /v1/models -> {PROV_NAME} 回源网络异常，本地回 502: {e}")
+            return 502, {"error_kind": "network", "upstream_status": None, "message": str(e)}
+    # 非 relay：静态选择器列表（deepseek/qwen）。
+    data = [{"type": "model", "id": mid, "display_name": disp, "supports_tools": None,
+             "created_at": "2026-01-01T00:00:00Z"} for mid, disp in PROV["models"]]
+    return 200, {"data": data, "has_more": False,
+                 "first_id": data[0]["id"] if data else None,
+                 "last_id": data[-1]["id"] if data else None}
 
 
 # ---------- Anthropic -> OpenAI 翻译（qwen 路径） ----------
@@ -363,11 +564,8 @@ class H(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         if self.path.startswith("/v1/models"):
-            data = [{"type": "model", "id": mid, "display_name": disp,
-                     "created_at": "2026-01-01T00:00:00Z"} for mid, disp in PROV["models"]]
-            log(f"GET /v1/models -> {PROV_NAME}: {', '.join(m[0] for m in PROV['models'])}")
-            self._send_json(200, {"data": data, "has_more": False,
-                                  "first_id": data[0]["id"], "last_id": data[-1]["id"]})
+            code, body = build_models_response()
+            self._send_json(code, body)
         elif self.path.startswith("/health"):
             self._send_json(200, {"status": "ok", "provider": PROV_NAME})
         else:
@@ -499,26 +697,25 @@ class H(BaseHTTPRequestHandler):
         body["model"] = target
         if body.get("max_tokens"):
             body["max_tokens"] = clamp_max_tokens(body["max_tokens"], target)
-        # DeepSeek 的 thinking 归一化：
-        #  - 强制 tool_choice（any/tool，如标题/verdict 生成）：必须显式关 thinking。
-        #    注意 DeepSeek flash 默认 thinking 开，即使请求里 thinking=null 也会与强制工具冲突，故无条件置 disabled。
-        #  - 否则若 thinking.type=="auto"（Science 发的）→ "adaptive"（DeepSeek 只认 adaptive/enabled/disabled）。
-        tc = body.get("tool_choice")
-        forcing = isinstance(tc, dict) and tc.get("type") in ("any", "tool")
-        if forcing:
-            body["thinking"] = {"type": "disabled"}
-        else:
-            th = body.get("thinking")
-            if isinstance(th, dict) and th.get("type") == "auto":
-                th = dict(th)
-                th["type"] = "adaptive"
-                body["thinking"] = th
+        # thinking 归一化（spec v3 §3.1 + 真机 §3.5 per-provider）：(A) forced→disabled 仅 deepseek；
+        # (B) relay 按模板策略：adaptive（MiniMax 等）/ enabled（Kimi）。见 normalize_thinking。
+        normalize_thinking(body, PROV_NAME, RELAY_THINKING)
         stream = bool(body.get("stream"))
         n_tools = len(body.get("tools") or [])
         log(f"POST /v1/messages  {src}->{target} stream={stream} tools={n_tools} "
             f"msgs={len(body.get('messages') or [])}  (入站鉴权已剥离, 直连 {PROV_NAME})")
-        headers = {"x-api-key": KEY, "content-type": "application/json", "anthropic-version": "2023-06-01"}
+        # 鉴权头按 provider 的 auth_style：deepseek 默认 x-api-key；relay 用 both（同时带
+        # x-api-key + Authorization: Bearer，兼容各家中转站）。KEY 只驻内存、不入日志。
+        headers = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
+        headers.update(_upstream_auth_headers())
         data = json.dumps(body).encode()
+        # DSML 兜底：仅当模式为 detect/rewrite 且本请求确有工具时才介入（无工具 = 无工具调用可泄漏）。
+        # off（默认）与无工具场景：走下面「原样透传」分支，字节级不变、零回归。
+        known_tools = {t["name"]: (t.get("input_schema") or {})
+                       for t in (body.get("tools") or [])
+                       if isinstance(t, dict) and t.get("name")}
+        shim_on = SHIM_MODE in ("detect", "rewrite") and bool(known_tools)
+        nonce = f"{id(areq) & 0xffffff:x}"
         headers_sent = False
         try:
             if stream:
@@ -530,7 +727,21 @@ class H(BaseHTTPRequestHandler):
                     self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
                     headers_sent = True
-                    self.wfile.write(hex(len(first))[2:].encode() + b"\r\n" + first + b"\r\n")
+
+                    def _wc(b):
+                        if b:
+                            self.wfile.write(hex(len(b))[2:].encode() + b"\r\n" + b + b"\r\n")
+
+                    rw = dsml_shim.DsmlStreamRewriter(known_tools, nonce=nonce) \
+                        if (shim_on and SHIM_MODE == "rewrite") else None
+                    det = dsml_shim.DsmlDetector() if (shim_on and SHIM_MODE == "detect") else None
+                    # 第一帧同样要过 shim（状态机/检测器必须从第 0 字节按序看到全部上游数据）。
+                    if rw is not None:
+                        _wc(rw.feed(first))
+                    else:
+                        _wc(first)
+                        if det is not None:
+                            det.feed(first)
                     while True:
                         try:
                             chunk = r.read(4096)
@@ -540,18 +751,41 @@ class H(BaseHTTPRequestHandler):
                             return
                         if not chunk:
                             break
-                        self.wfile.write(hex(len(chunk))[2:].encode() + b"\r\n" + chunk + b"\r\n")
+                        if rw is not None:
+                            _wc(rw.feed(chunk))
+                        else:
+                            _wc(chunk)
+                            if det is not None:
+                                det.feed(chunk)
+                    if rw is not None:
+                        _wc(rw.finalize())
                     self.wfile.write(b"0\r\n\r\n")
-                log(f"  <- {PROV_NAME} 流式透传 OK")
+                if rw is not None and rw.synthesized:
+                    log(f"  <- {PROV_NAME} 流式 DSML 改写 OK（合成 tool_use×{rw.tool_n}）")
+                elif det is not None and det.found:
+                    log(f"  <- {PROV_NAME} 流式透传 OK（!! detect：本响应含 DSML 泄漏，未改写）")
+                else:
+                    log(f"  <- {PROV_NAME} 流式透传 OK")
             else:
                 body_bytes, ct = http_post(PROV["url"], data, headers)
+                if shim_on and SHIM_MODE == "rewrite":
+                    new_bytes = dsml_shim.rewrite_nonstream_body(body_bytes, known_tools, nonce=nonce)
+                    if new_bytes != body_bytes:
+                        log(f"  <- {PROV_NAME} 非流式 DSML 改写 OK（展开 tool_use）")
+                    body_bytes = new_bytes
+                elif shim_on and SHIM_MODE == "detect":
+                    det = dsml_shim.DsmlDetector()
+                    det.feed(body_bytes)
+                    if det.found:
+                        log(f"  !! detect：非流式响应含 DSML 泄漏，未改写")
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header("Content-Length", str(len(body_bytes)))
                 self.end_headers()
                 headers_sent = True
                 self.wfile.write(body_bytes)
-                log(f"  <- {PROV_NAME} 非流式透传 OK")
+                if not (shim_on and SHIM_MODE == "rewrite"):
+                    log(f"  <- {PROV_NAME} 非流式透传 OK")
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             log(f"  !! 上游 HTTP {e.code}: {detail}")
@@ -644,12 +878,28 @@ if __name__ == "__main__":
     ap.add_argument("--env-file", default=None)
     ap.add_argument("--log", default=None)
     ap.add_argument("--auth-token", default=None)
+    ap.add_argument("--relay-base", default=None,
+                    help="relay provider 的中转站 base_url（也可用环境变量 CSSWITCH_RELAY_BASE_URL）")
     args = ap.parse_args()
     PROV_NAME = args.provider
     PROV = PROVIDERS[PROV_NAME]
     LOG = args.log
     KEY = load_key(PROV, args)
     AUTH_SECRET = os.environ.get("CSSWITCH_AUTH_TOKEN") or args.auth_token
+    # relay：按中转站 base_url 装配上游端点（base + /v1/messages、base + /v1/models）。
+    if PROV_NAME == "relay":
+        base = (os.environ.get("CSSWITCH_RELAY_BASE_URL") or args.relay_base or "").strip().rstrip("/")
+        if not base or not re.match(r"^https?://", base):
+            print("relay 需要中转站 base_url（http(s)://…）。用 --relay-base 或环境变量 "
+                  "CSSWITCH_RELAY_BASE_URL 提供。", file=sys.stderr)
+            sys.exit(1)
+        PROV = dict(PROV)
+        PROV["url"] = base + "/v1/messages"
+        PROV["models_url"] = base + "/v1/models"
+        forced = (os.environ.get("CSSWITCH_RELAY_MODEL") or "").strip()
+        if forced:
+            RELAY_FORCE_MODEL = forced
+        RELAY_THINKING = (os.environ.get("CSSWITCH_RELAY_THINKING") or "").strip() or None
     _up = os.environ.get("CSSWITCH_UPSTREAM_URL")
     if _up:
         PROV = dict(PROV)
@@ -657,8 +907,10 @@ if __name__ == "__main__":
     if not KEY:
         print(f"找不到 {PROV['key_env']}。用环境变量或 --env-file <路径> 提供。", file=sys.stderr)
         sys.exit(1)
+    # DSML 兜底 shim 模式（默认 off；relay 恒 off；deepseek 且 dsml_capable 才读环境变量）。
+    SHIM_MODE = dsml_shim.shim_mode(PROV_NAME, PROV)
     log(f"CSSwitch 代理启动 127.0.0.1:{args.port}  provider={PROV_NAME}  "
-        f"key=已加载(未显示)  上游={PROV['url']}")
+        f"key=已加载(未显示)  上游={PROV['url']}  dsml_shim={SHIM_MODE}")
     # 绑定重试：上次会话遗留的孤儿代理可能还占着端口（app 侧会主动清，但退干净需一点时间）。
     # 重试 ~3s 等端口释放，避免一次绑不上就直接失败（Errno 48）。
     srv = None

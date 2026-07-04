@@ -1,5 +1,10 @@
 # GitHub 页面布置 + 首个 Release 设计
 
+> **历史文档（v0.1.0 首发设计，2026-07 起已被实际的 `README.md` + 仓库 About + 各版 Release 取代）。**
+> 其中「菜单栏 app」「一键越登录」等为当时措辞：现 app 已改**正常窗口**（去托盘），对外文案也已**脱敏**
+> （不直说「越过登录」）。当前状态以 [`../README.md`](../README.md) / [`../CHANGELOG.md`](../CHANGELOG.md) /
+> GitHub Releases / [`known-issues.md`](known-issues.md) 为准。本稿仅留作首发规划的历史留存。
+
 面向「公开全量 + 免责声明」（spec §12.1 已定）。这份是**页面怎么摆**的成品设计：仓库首页、About、
 topics、社交预览、v0.1.0 Release 文案、以及公开推送的执行清单。措辞对普通用户友好，避免绝对断言。
 
@@ -73,7 +78,7 @@ openai-compatible  llm  proxy  mcp  tauri  menubar  macos
 
 1. `gh auth refresh -h github.com`（用户自己做，Claude 不代登录）。
 2. **再跑一遍 gitleaks**：工作树 + 暂存区 + 历史三处，确认 0 泄露（含新加的 `docs/assets/`、图标资源）。
-3. `git remote add origin <用户确认的仓库>`，仓库名建议 `CSswitch`（与本地一致）。
+3. `git remote add origin <用户确认的仓库>`，仓库名建议 `CSSwitch`（与本地一致）。
 4. `git push -u origin main`。
 5. `gh release create v0.1.0 <dmg 路径> --title ... --notes-file <第 5 节正文>`。
 6. 仓库设置：填 About（第 2 节）+ Topics（第 3 节）+ 上传 Social preview（第 4 节）。
@@ -81,6 +86,6 @@ openai-compatible  llm  proxy  mcp  tauri  menubar  macos
 
 ## 7. 待用户拍板
 
-- 仓库名（默认 `CSswitch`）、公开/私有（§12.1 已选公开全量）、GitHub 账号（`junjieashan`）。
+- 仓库名（默认 `CSSwitch`）、公开/私有（§12.1 已选公开全量）、GitHub 账号（`junjieashan`）。
 - 是否随源码一并发 `.dmg`（附在 Release）。
 - 是否现在就做 universal（Intel）构建（需再装 x86_64 工具链，国内网络较慢）。

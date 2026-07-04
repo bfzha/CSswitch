@@ -4,6 +4,85 @@
 
 > **约定**：已修问题从 [`docs/known-issues.md`](docs/known-issues.md)「毕业」到这里（发布即定稿）；未修/进行中留在 known-issues；硬 bug 的根因证据链存在 [`findings/`](findings/)。
 
+## [0.3.2] — 2026-07-04
+
+> 主题：**Science 顶部显示真实模型名 + 新增 Kimi / MiniMax**。修复 relay 家在 Science 模型选择器里笼统显示「claude / opus」的问题（#11），让每个服务商都能选择或自填模型、并在 Science 里显示真实模型名；新增 Kimi（Moonshot）与 MiniMax；各家内置模型更新到官方主流版本。
+
+### 新增 Added
+- **Kimi（Moonshot）与 MiniMax 两家服务商**：均走原生 Anthropic 兼容端点（`api.moonshot.cn/anthropic` / `api.minimaxi.com/anthropic`），零协议转换。thinking 按各家要求注入（Kimi 强制 enabled、MiniMax 走 adaptive）。
+- **为每个服务商选择或自填模型**：模型输入从下拉改为「下拉精选 + 自填」——下拉里是我们维护的各家主流模型，也可以直接填写任意模型名。自定义端点终于有地方填模型名了。
+
+### 修复 Fixed
+- **relay 家在 Science 顶部选择器显示笼统的「claude / opus」（#11，#12 显示部分）**：根因是 Science 的模型面板二进制写死只认 `claude-` 开头的 id。现让 relay 家复用 DeepSeek 已验证的「借壳」做法——代理向 Science 返回一个 `claude-opus-4-8` 外壳、显示名写成你选择的真实模型名，实际推理仍走你选的模型。真机验证：Science 顶部正确显示 `glm-5.2` 等真实名。
+- **中转 / 自定义端点可以保存空的连接地址或空模型**：清空 `base_url` 或不选模型也能「保存成功」、激活时才失败。现在保存前就拦下，前端与后端各有一道守卫，绝不谎报已保存。
+- **各家内置模型过时**：上官方来源逐一核对，更新到当前主流版本（GLM 旗舰 `glm-5.2`、MiniMax 旗舰 `MiniMax-M3`、硅基 `DeepSeek-V4` 系、Kimi `kimi-k2.7-code` 等）。
+
+### 说明 Notes
+- 全 relay 家统一为「选一个模型」：GLM / OpenRouter 从「默认跟随 Science」改为需要指定一个模型。升级时，旧的未指定模型的配置会自动补上该服务商的默认模型，并给出一次提示。
+- 硅基流动的 Anthropic `/v1/messages` 兼容性经真机确认（返回 200，无需协议转换）。
+- 全绿：cargo test 122 / clippy 0 / fmt clean；代理单测 40；真机在隔离沙箱 Science 里验证模型选择器显示。铁律全程守住（真实 `~/.claude-science` 与 8765 端口未碰）。
+
+## [0.3.1] — 2026-07-04
+
+> 主题：**内置预设支持自定义 base_url**。修用户反馈的小米 MiMo「token plan」401。
+
+### 修复 Fixed
+- **内置预设 `base_url` 只读，导致小米 MiMo「token plan」报 401**：小米 MiMo 的「token plan」套餐走独立域名 `token-plan-cn.xiaomimimo.com/anthropic`，与内置的 `api.xiaomimimo.com/anthropic` 不是同一 host；旧版预设地址锁死改不了，套餐 key 打到内置域名被上游 401。现将四家 relay 预设（智谱 GLM / 小米 MiMo / 硅基流动 / OpenRouter）的 `base_url` 改为**可编辑的默认值**：预填官方地址，允许改到 token 套餐 / 区域镜像 / 自建反代（新建向导与「编辑连接」两处都可改）。DeepSeek / 通义千问为原生 adapter（上游地址在代理内固定，运行时不吃自定义地址），保持只读以免「能填但不生效」的假象。「自定义」来源行为不变（空地址、可编辑）。
+
+### 说明 Notes
+- 纯前端 + 模板注册表改动，不改运行语义与鉴权。cargo test 114 全绿 / clippy 0 / fmt clean；前端预览实测（新建向导 + 编辑连接均可改、原生仍锁、自定义仍空、改到 token-plan 地址生效）。
+- 顺带修 `config.rs` 一处历史 fmt 漂移。
+
+## [0.3.0] — 2026-07-04
+
+> 主题：**多 API 支持 + UI 改版**。从只支持 DeepSeek / 通义千问两家，扩展到 7 家 provider + 自定义端点的 cc-switch 式**多 profile 管理**；面板重做为配置列表 + chip 网格 + 三能力模型呈现。真机验收通过，正式毕业为**稳定版**（取代 v0.2.1 成为 Latest）。`0.3.0-beta.1/beta.2` 大预览版的内容在此定稿。
+
+### 新增 Added
+- **多 API / 多 provider 支持**：内置 7 家模板（DeepSeek、通义千问、智谱 GLM、OpenRouter、小米 MiMo、硅基流动）+ **自定义 OpenAI / Anthropic 兼容端点**（自填 `base_url` / 模型 / Key）。
+- **cc-switch 式多 profile 配置管理**：把「固定槽」升级为用户自管的命名配置列表 + 当前生效指针；同一家可存多套、命名、增删、一键切换。切换是**事务式**的（先探活候选、健康才提交、失败回滚、全程不停沙箱）。配置用 JSON 存储并硬化（原子写 + schema 版本 + 覆盖前留 `.bak`），v1→v2 迁移不丢数据。
+- **中转站 relay provider**：填 `base_url` + `token` 即可接任意 Anthropic 兼容中转站；`/v1/models` 回源自动铺该站真实模型到选择器。
+- **DSML 工具调用兜底 shim（默认 `off`）**：DeepSeek 偶发把工具调用泄漏成纯文本 DSML 标记致 Science 卡死（issue #8）；由环境变量 `CSSWITCH_TOOLUSE_SHIM` 选 `off`（默认字节透传）/ `detect`（透传 + 遥测）/ `rewrite`（还原成真正的 `tool_use`）。
+
+### 变更 Changed
+- **面板 UI 改版**：重做为 profile 配置列表；来源选择改 **chip 网格**（键盘可达 / `aria-pressed`）；模型字段按**三能力**呈现（native 内置映射 / relay 跟随 Science / relay 固定）；新建 / 编辑走独立视图（隐藏运行区、保留反馈区）；文案瘦身 + a11y（label 关联 / `:focus-visible`）。折入四轮外审反馈。
+- **反馈栏空闲不占位**：去掉常驻「就绪。」，只有真实反馈（错误 / 结果 / 自检输出）时才显示。
+
+### 修复 Fixed
+- **配置列表长 key 掩码横向溢出**：掩码原来一个字符一个圆点，长 key 在 WKWebView 里不换行、撑出横向滚动条、裁掉行与按钮。改为**定长** `••••` + 末 4 位（任何长度都短、不泄漏 key 长度）。
+- **自检（doctor）对非 deepseek/qwen 来源误报**：`doctor.sh` 停留在单 provider 时代、按 provider 名写死并去 shell 环境找 key，导致 glm/xiaomi 等生效时误报「未知 provider」。改为多 profile 感知（据 adapter + key 有无报告，key 存 `config.json`）。
+- 承接 beta.1/beta.2 的多 profile / DSML 修复（无效 native key 拦截、切换回滚健壮性、SSE 末帧、布尔校验、rewrite 无泄漏不逐字等，详见下方 beta 条目）。
+
+### 说明 Notes
+- **真机验收已完成**：多 profile / relay 的真机行为经用户在场实测确认（beta 阶段的 RM 待办已消解）；DSML 仍默认 `off`，`rewrite` 需显式开启。
+- **铁律零回退**：全程只碰隔离沙箱，绝不触碰真实 `~/.claude-science` 与端口 8765；真机测试由用户在场完成、Claude 不代登录。
+- **验收闸门**：cargo test 113 全绿 / node / bash 语法通过。
+- **拔 node / python（治本）仍在 roadmap**：app 运行时零 node（虚拟登录 Rust 原生，v0.1.4 起）；翻译代理仍 Python，收敛到 Rust 单二进制待后续。
+
+## [0.3.0-beta.2] — 2026-07-04
+
+> 主题：**大预览版（Big Preview）**。一次把三块尚未进正式版的功能合在一起供实机试用：① cc-switch 式**多 profile 配置管理** + **中转站 relay provider**；② DeepSeek 工具调用泄漏**兜底 shim**（默认 `off`）。
+>
+> **⚠️ 这是预览/测试版（prerelease），不是稳定版。** 稳定版仍是 **v0.2.1**。多 profile 与 relay 的真机行为仍待复测（见「说明」），DSML 默认关闭仅供显式验证。本版**取代并撤回**同日名不副实的 `v0.3.0-beta.1`（那版 CHANGELOG 只写了 DSML，却把桌面侧改动一并打包却未如实说明）。
+
+### 新增 Added
+- **多 profile 配置管理（cc-switch 式）**：把原来的「固定槽」（每家一份）升级为**用户自管的命名配置列表 + 当前生效指针**：同一家（如 GLM）可存多套、命名、增删、一键切换。切换是**事务式**的：先探活候选、健康才提交、失败回滚、全程不停沙箱。内置 7 家 provider 模板。配置继续用 **JSON** 存储并硬化（原子写 + schema 版本字段 + 覆盖前留 `.bak`），SQLite 缓议。
+- **中转站 relay provider**：只需填 `base_url` + `token` 即可接**任意 Anthropic 兼容中转站**；`/v1/models` 回源自动把该站真实模型铺进选择器；双鉴权头兼容各家。
+- **DSML 兜底 shim（默认 `off`）**：DeepSeek 偶发把工具调用泄漏成纯文本 DSML 标记（`<｜｜DSML｜｜tool_calls>…`），Science 当普通文本、工具无回执 → **卡死**（issue #8）。shim 端到端接进 `_handle_anthropic`，由环境变量 `CSSWITCH_TOOLUSE_SHIM` 选模式：`off`（默认、字节透传、零回归）/ `detect`（透传 + 遥测）/ `rewrite`（把泄漏还原成真正的 `tool_use`）。新增 `test/test_proxy_dsml_e2e.py` 端到端证明。
+
+### 修复 Fixed
+- **（多 profile）无效 native key 被误报「已切到」**：`deepseek`/`qwen` 等 native adapter 此前跳过上游校验、只探本地 `/health`（恒回 200 不验 key），坏 key 会被提交为当前生效、UI 谎报成功、直到首个真实推理才 401。现 native 也走隔离探测打 `/v1/messages` 触上游，坏 key 拦下不提交、active 与旧代理不动。
+- **（多 profile）切换/编辑健壮性**：切换写盘失败回滚进程；停沙箱失败即返错且端口不变（不再谎称已重置）；非 active 连接编辑 truthful-save（只拦明确 4xx、其余据实标「未校验，激活再验」）；真机护栏拒软链 + `canonicalize` 拒落真实 HOME 内 + 写盘先删软链再写新文件；若干前端如实提示。
+- **（DSML）SSE 末帧丢失**：`_drain_frames` 的 `flush_tail` 形参此前未被使用，EOF 突然时吞掉 `message_stop`（实测 `b''`）。现 `finalize()` 补吐末帧。
+- **（DSML）非法布尔臆断成 `false`**：`_coerce_param` 此前把 `maybe` 之类都当 `False` 并过校验，可能合成参数错误的真实工具调用。现只认 `true/1/yes`、`false/0/no`，其余整块作废。
+- **（DSML）rewrite 非流式无泄漏时不逐字 + 遥测误报**（清洁 agent 实机验证发现）：`rewrite_nonstream_body` 此前无条件 `json.dumps` 再序列化，干净响应也被改字节且误报「已改写」。现无改动时原样返回原字节。
+
+### 说明 Notes
+- **⚠️ 多 profile / relay 仍待真机复测**：RM-04/06/13（非 active native 编辑即时校验、无效 native key 必被拦、端口占用报错措辞）代码 + 单测已覆盖，但**真机行为需在场实测确认**（铁律 4，Claude 不代登录）。这正是本版为 prerelease 的原因；请勿当稳定版依赖。
+- **DSML 默认关闭**：普通用户安装后 DSML 行为与 0.2.1 一致；`rewrite` 需 `CSSWITCH_TOOLUSE_SHIM=rewrite` 显式开启（`detect` 只统计不改写）。把 rewrite 设为默认留待其余闸门（如把合法 DSML 示例误判为调用的边界）关闭后的后续版本。
+- **铁律零回退**：全程只碰隔离沙箱，绝不触碰真实 `~/.claude-science` 与端口 8765；真机测试须用户在场、Claude 不代登录。
+- **验收闸门**：cargo test 113 / clippy -D warnings 0 / `run_all.sh` ALL GREEN / gitleaks 0。
+- **拔 node/python（治本）未在本版**：proxy 仍是 Python、伪造器仍是 Node，收敛到 Rust 单二进制仍在 roadmap。
+
 ## [0.2.1] — 2026-07-03
 
 > 主题：热修「开了 CSSwitch 仍被要求登录」。0.2.0 有两个会导致「流程走完仍落登录页」的缺陷，本版各修一个并各补一条离线回归测试。链路方案本身没坏（代理此前成功处理过真实聊天、虚拟 OAuth 结构自洽），坏的是「重开 / 取入口 URL」路径。

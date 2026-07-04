@@ -4,11 +4,14 @@
 #   - 绝不打印任何 provider key 的值（只报 present/absent）。
 #   - 端口命中真实实例保留端口 8765 直接失败（铁律）。
 # 覆盖变量（便于测试与自定义）：
-#   CSSWITCH_PROVIDER (deepseek|qwen)  CSSWITCH_PROXY_PORT  CSSWITCH_SANDBOX_PORT
-#   CSSWITCH_CONFIG (config.json 路径)  SCIENCE_BIN
+#   CSSWITCH_PROVIDER (生效 template_id，如 deepseek/qwen/glm/xiaomi/…)
+#   CSSWITCH_ADAPTER  (deepseek|qwen|relay)   CSSWITCH_KEY_PRESENT (0|1)
+#   CSSWITCH_PROXY_PORT  CSSWITCH_SANDBOX_PORT  CSSWITCH_CONFIG (config.json 路径)  SCIENCE_BIN
 set -u
 
-PROVIDER="${CSSWITCH_PROVIDER:-deepseek}"
+PROVIDER="${CSSWITCH_PROVIDER:-}"
+ADAPTER="${CSSWITCH_ADAPTER:-}"
+KEY_PRESENT="${CSSWITCH_KEY_PRESENT:-0}"
 PROXY_PORT="${CSSWITCH_PROXY_PORT:-18991}"
 SANDBOX_PORT="${CSSWITCH_SANDBOX_PORT:-8990}"
 CONFIG="${CSSWITCH_CONFIG:-$HOME/.csswitch/config.json}"
@@ -21,7 +24,7 @@ warn() { echo "  ⚠ $1"; WARN=$((WARN + 1)); }
 fail() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
 
 echo "CSSwitch doctor（只读诊断，不启动进程、不联网、绝不碰真实目录）"
-echo "provider=$PROVIDER  代理端口=$PROXY_PORT  沙箱端口=$SANDBOX_PORT"
+echo "生效来源=${PROVIDER:-（无）}  适配器=${ADAPTER:-（无）}  代理端口=$PROXY_PORT  沙箱端口=$SANDBOX_PORT"
 
 echo "[依赖]"
 if command -v python3 >/dev/null 2>&1; then pass "python3 $(python3 --version 2>&1 | awk '{print $2}')"; else fail "缺 python3（起翻译代理需要）"; fi
@@ -32,18 +35,15 @@ if command -v node >/dev/null 2>&1; then pass "node $(node --version 2>&1)（app
 echo "[Science 二进制]"
 if [ -x "$SCIENCE_BIN" ]; then pass "找到 $SCIENCE_BIN"; else warn "未找到 Science 二进制（一键越登录需要）：$SCIENCE_BIN"; fi
 
-echo "[Provider Key]"
-case "$PROVIDER" in
-  deepseek) KEY_ENV="DEEPSEEK_API_KEY"; KEY_VAL="${DEEPSEEK_API_KEY:-}";;
-  qwen)     KEY_ENV="DASHSCOPE_API_KEY"; KEY_VAL="${DASHSCOPE_API_KEY:-}";;
-  *)        KEY_ENV=""; KEY_VAL="";;
-esac
-if [ -z "$KEY_ENV" ]; then
-  fail "未知 provider：${PROVIDER}（应为 deepseek 或 qwen）"
-elif [ -n "$KEY_VAL" ]; then
-  pass "$KEY_ENV 已设置（值不显示）"
+echo "[生效配置]"
+# 多 profile：key 存 config.json（不再看 shell 环境变量）。app 传来 template_id + adapter +
+# key 有无（KEY_PRESENT）。任一模板都不该在这里「未知 provider」失败。
+if [ -z "$PROVIDER" ]; then
+  warn "当前没有「生效」配置（在面板点「设为当前」选一条）"
+elif [ "$KEY_PRESENT" = "1" ]; then
+  pass "生效来源：${PROVIDER}（${ADAPTER:-?} 适配器）· key 已配置在 config.json（值不显示）"
 else
-  warn "$KEY_ENV 未在环境中设置（可改用 config.json 或代理 --env-file 提供）"
+  warn "生效来源：${PROVIDER}（${ADAPTER:-?} 适配器）· 尚未填 key（在面板该配置里粘贴）"
 fi
 
 echo "[端口]"
