@@ -168,60 +168,34 @@ pub fn cmd_config_get() -> CliEnvelope {
 }
 
 /// `config set <json>` — 写入 `~/.csswitch/config.json`。
+/// 审查 C1 修复：使用 `config.rs` 的安全写入路径（symlink 拒绝 + 0600 + 原子写）。
 pub fn cmd_config_set(json_str: &str) -> CliEnvelope {
     let v: Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => return CliEnvelope::err("config_parse_error", &format!("JSON 解析失败：{e}")),
     };
-    let dir = config_dir();
-    let path = config_path();
-    if let Err(e) = fs::create_dir_all(&dir) {
-        return CliEnvelope::err("config_write_error", &format!("创建配置目录失败：{e}"));
-    }
-    let json = match serde_json::to_vec_pretty(&v) {
-        Ok(j) => j,
-        Err(e) => return CliEnvelope::err("config_serialize_error", &format!("序列化失败：{e}")),
+    // 构建 Config 对象并走安全写入路径（复用 config.rs 的 save_to 函数）
+    let cfg: crate::config::Config = match serde_json::from_value(v) {
+        Ok(c) => c,
+        Err(e) => return CliEnvelope::err("config_parse_error", &format!("配置格式错误：{e}")),
     };
-    if let Err(e) = fs::write(&path, &json) {
-        return CliEnvelope::err("config_write_error", &format!("无法写入配置文件：{e}"));
+    let dir = config_dir();
+    if let Err(e) = crate::config::save_to(&dir, &cfg) {
+        return CliEnvelope::err("config_write_error", &format!("写入配置失败：{e}"));
     }
     CliEnvelope::ok_empty()
 }
 
 /// `config save-key <provider> <key>` — 保存 provider key。
+/// 审查 C1 修复：使用 `config.rs` 的 update 函数走安全读写路径。
 pub fn cmd_config_save_key(provider: &str, key: &str) -> CliEnvelope {
-    let path = config_path();
     let dir = config_dir();
-    let _ = fs::create_dir_all(&dir);
-
-    let mut cfg: Value = if path.exists() {
-        match fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or(json!({})),
-            Err(_) => json!({}),
-        }
-    } else {
-        json!({
-            "provider": "deepseek",
-            "proxy_port": 18991,
-            "sandbox_port": 8990,
-            "mode": "proxy",
-        })
-    };
-
-    // 确保 providers 对象存在
-    if cfg.get("providers").is_none() {
-        cfg["providers"] = json!({});
+    let result = crate::config::update(&dir, |cfg| {
+        cfg.providers.entry(provider.to_string()).or_default().key = key.to_string();
+    });
+    if let Err(e) = result {
+        return CliEnvelope::err("config_write_error", &format!("保存 key 失败：{e}"));
     }
-    cfg["providers"][provider] = json!({"key": key});
-
-    let json_bytes = match serde_json::to_vec_pretty(&cfg) {
-        Ok(j) => j,
-        Err(e) => return CliEnvelope::err("config_serialize_error", &format!("序列化失败：{e}")),
-    };
-    if let Err(e) = fs::write(&path, &json_bytes) {
-        return CliEnvelope::err("config_write_error", &format!("无法写入配置文件：{e}"));
-    }
-
     // 返回掩码后的 key
     let masked = if key.len() > 4 {
         format!("{}{}", "•".repeat(key.len() - 4), &key[key.len() - 4..])

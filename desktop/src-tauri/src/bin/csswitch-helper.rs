@@ -11,7 +11,11 @@
 //! 编译（无 Tauri 依赖）：
 //!   cargo build --bin csswitch-helper --no-default-features --release
 
-// 通过 #[path] 引入 cli 模块（helper 不依赖 Tauri，无法用 crate:: 引用整个 lib）。
+// 通过 #[path] 引入共享模块（helper 不依赖 Tauri，无法用 crate:: 引用整个 lib）。
+#[path = "../config.rs"]
+mod config;
+#[path = "../fs_ext.rs"]
+mod fs_ext;
 #[path = "../cli/mod.rs"]
 mod cli;
 
