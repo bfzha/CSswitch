@@ -74,8 +74,8 @@ static TEMPLATES: &[Template] = &[
         adapter: "relay",
         base_url: "https://open.bigmodel.cn/api/anthropic",
         base_url_editable: true,
-        requires_model_override: false,
-        builtin_models: &["glm-4.6", "glm-5", "glm-4.5-air"],
+        requires_model_override: true, // #9：全 relay 统一 FIXED（选/填一个模型 → force）
+        builtin_models: &["glm-5.2", "glm-4.7", "glm-4.6", "glm-4.5-air"], // 官方核定 2026-07-04：旗舰 glm-5.2
         website_url: "https://open.bigmodel.cn",
         icon: "glm",
         icon_color: "#2E6BE6",
@@ -105,7 +105,12 @@ static TEMPLATES: &[Template] = &[
         base_url: "https://api.siliconflow.cn",
         base_url_editable: true,
         requires_model_override: true,
-        builtin_models: &["deepseek-ai/DeepSeek-V3", "zai-org/GLM-5.2"],
+        builtin_models: &[
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "deepseek-ai/DeepSeek-V3.2",
+            "zai-org/GLM-5.2",
+        ], // 官方核定 2026-07-04；⚠️ Anthropic /v1/messages 兼容待真机证实（spec 附录）
         website_url: "https://siliconflow.cn",
         icon: "siliconflow",
         icon_color: "#7C3AED",
@@ -120,7 +125,7 @@ static TEMPLATES: &[Template] = &[
         base_url: "https://api.moonshot.cn/anthropic", // 国际站可改 api.moonshot.ai/anthropic
         base_url_editable: true,
         requires_model_override: true,
-        builtin_models: &["kimi-k2.7-code", "kimi-k2.7-code-highspeed"],
+        builtin_models: &["kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"], // 官方核定 2026-07-04
         website_url: "https://platform.moonshot.cn",
         icon: "kimi",
         icon_color: "#16182F",
@@ -135,7 +140,7 @@ static TEMPLATES: &[Template] = &[
         base_url: "https://api.minimaxi.com/anthropic", // 国内站（真机验证：key 有效 + /v1/models 实时发现 200）；国际站改 api.minimax.io
         base_url_editable: true,
         requires_model_override: true,
-        builtin_models: &["MiniMax-M2.7", "MiniMax-M3"],
+        builtin_models: &["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"], // 官方核定 2026-07-04：旗舰 M3（2026-06-01 GA）
         website_url: "https://platform.minimaxi.com",
         icon: "minimax",
         icon_color: "#E1341E",
@@ -149,11 +154,12 @@ static TEMPLATES: &[Template] = &[
         adapter: "relay",
         base_url: "https://openrouter.ai/api",
         base_url_editable: true,
-        requires_model_override: false,
+        requires_model_override: true, // #9：全 relay 统一 FIXED
         builtin_models: &[
             "anthropic/claude-sonnet-5",
+            "anthropic/claude-opus-4.8",
             "anthropic/claude-opus-4.8-fast",
-        ],
+        ], // 官方核定 2026-07-04：补非 2x 价的 opus-4.8
         website_url: "https://openrouter.ai",
         icon: "openrouter",
         icon_color: "#6467F2",
@@ -282,9 +288,16 @@ mod tests {
         assert!(by_id("siliconflow").unwrap().requires_model_override);
         assert!(by_id("kimi").unwrap().requires_model_override);
         assert!(by_id("minimax").unwrap().requires_model_override);
-        assert!(!by_id("glm").unwrap().requires_model_override);
-        assert!(!by_id("openrouter").unwrap().requires_model_override);
+        assert!(by_id("glm").unwrap().requires_model_override); // 改：全 relay 统一 force
+        assert!(by_id("openrouter").unwrap().requires_model_override); // 改
         assert!(by_id("custom").unwrap().requires_model_override);
+        // 旗舰默认 = builtin_models 首项（官方核定，2026-07-04）
+        assert_eq!(by_id("glm").unwrap().builtin_models[0], "glm-5.2");
+        assert_eq!(by_id("minimax").unwrap().builtin_models[0], "MiniMax-M3");
+        assert_eq!(
+            by_id("openrouter").unwrap().builtin_models[0],
+            "anthropic/claude-sonnet-5"
+        );
     }
 
     #[test]
