@@ -122,7 +122,9 @@
 
 ## 9. 模型选择器显示 claude / opus（用户 2026-07-04 批次，⭐高优先：先修再发 v0.3.2）
 
-> **状态：根因已定位（读代码证实），修复方案待用户审阅定；用户拍板【优先修这个，Kimi/MiniMax 代码虽已就绪工作树也先不发版，等它一起发】。** 对应用户 bug 清单 #11（智谱等显示 claude）+ #12 一部分（自定义显示 opus）。
+> **状态：已实现 + 真机验证通过，已 merge 进 main（2026-07-04，分支 `feat/relay-model-shell` 8 commit FF 合入），待随 v0.3.2 发布。** 真机证据：沙箱 Science 顶部选择器显示真实模型名 `glm-5.2`（非 claude/opus），代理 `/v1/models` 在 force 时返回单壳 `{id:claude-opus-4-8, display_name:真实名}`；铁律全程守住（8765 与真实目录未碰）。对应用户 bug 清单 #11（智谱等显示 claude）+ #12 显示部分（自定义显示 opus）。**#12 的校验部分（自定义 scratch 探测误判 Ambiguous）仍待复现，未在本轮解决。**
+>
+> **修复摘要（对齐 deepseek 借壳 + cc-switch 自填范式，spec/plan 见本地 `docs/superpowers/`，git 忽略）**：① 层二＝代理 `build_models_response` 在 `RELAY_FORCE_MODEL` 设时返回单壳（`claude-opus-4-8` + `display_name`＝真实模型名），出站由 `resolve_model` 的 force 分支覆盖、零改动；② 层一＝全 relay 统一 FIXED（GLM/OpenRouter 也 `requires_model_override=true`），模型控件从 `<select>` 换成 `<input list>+<datalist>`（下拉精选＋自填兜底，`custom` 终于能填模型名）；③ 各家 `builtin_models` 官方核定（GLM→`glm-5.2`、MiniMax→`MiniMax-M3`、硅基→`DeepSeek-V4-Pro` 等，硅基 Anthropic `/v1/messages` 真机 200）；④ 后端 `relay_missing_model` 守卫接 create/edit/activate（不变量不可绕过）；⑤ 存量空 model 的 relay 加载时回填模板默认＋一次性提示（甲迁移）；⑥ 模型名 trim 规范化。原设计如下（历史留存）：
 
 - **现象**：① 智谱 GLM 等 relay 家在 Science 顶部模型选择器里「显示的是 claude」；② 自定义（填 claude 中转 API）「显示的是 opus」；用户说「自定义的模型也有问题」。
 - **根因（`proxy/csswitch_proxy.py` PROVIDERS 注释已证实，逆向标记 s0/ZjO/XjO/hB_）**：Science 模型面板有**二进制写死的两道硬规则**——① 可选模型 id **必须 `claude-` 开头**；② 只有 `claude-{opus|sonnet|haiku}-<纯数字版本>` 进**主列表**（每 family 留一个），其余进「More models」折叠。**CSSwitch 改不了 Science 这个 UI**，只能控制代理 `/v1/models` 返回什么。
@@ -159,8 +161,8 @@
 | 8 | Directory connectors unavailable / session expired | 架构边界：目录连接器是 claude.ai 服务端功能 |
 | 9 | 弹 sign in 但点一下直接进（没真登录） | 架构边界/预期：虚拟登录表现为"未登录门票" |
 | 10 | 截图（待补） | 待辨 |
-| **11** | **模型选择器显示不正确**（小米/智谱/openrouter/硅基/kimi/minimax 都有） | **→ 见 #9，⭐高优先先修** |
-| **12** | **自定义 API「无法确认(网络/上游繁忙)，未切换，可重试或跳过验证」**；用户说 curl 没问题 | 疑代理探测/校验 bug（自定义 relay 的 scratch 探测把可用端点误判为 Ambiguous）+ 显示 opus（→ #9）。**需复现**：拿用户的自定义 base_url/流程，看 scratch Message/Models 探测状态码为何非 200；curl 通但代理探测不通 = 探测路径/鉴权头/thinking 注入差异 |
+| **11** | **模型选择器显示不正确**（小米/智谱/openrouter/硅基/kimi/minimax 都有） | **✅ 已修（见 #9，真机验证 `glm-5.2` 正确显示，merge 进 main 待 v0.3.2 发）** |
+| **12** | **自定义 API「无法确认(网络/上游繁忙)，未切换，可重试或跳过验证」**；用户说 curl 没问题 | 显示 opus 部分 **✅ 已修（→ #9：custom 现可自填模型名 + 借壳显示真实名）**；校验部分（自定义 relay 的 scratch 探测把可用端点误判为 Ambiguous）**仍需复现**：拿用户的自定义 base_url/流程，看 scratch Message/Models 探测状态码为何非 200；curl 通但代理探测不通 = 探测路径/鉴权头/thinking 注入差异 |
 
 - **三大根因归类**（沿用 2026-07-03 分诊，`findings/2026-07-03-user-reported-bugs-triage.md`）：① 架构边界（claude.ai 服务端功能被 401 隔离）=#3/#5/#8/#9；② 模型端（DeepSeek 透传把 tool_use 吐成文本卡死）=#2/#6 最严重；③ 疑可修代理 bug=#4（输出一晃而过）/#12（自定义校验）/#1（梯子）。
-- **下一步优先级（用户 2026-07-04 定）**：先修 **#9 模型选择器**（先出 spec）→ 再看 #12 自定义校验（需复现）→ 一起随 v0.3.2 发（Kimi/MiniMax 已就绪等它）。
+- **下一步优先级（2026-07-04 更新）**：~~先修 #9 模型选择器~~ **✅ #9 已实现 + 真机验证 + merge 进 main**。剩：① 补 README/About → 走 v0.3.2 发版（版本 bump/tag/dmg/Release）；② #12 校验部分（自定义 scratch 误判）待复现；③ Kimi/MiniMax 已就绪随 v0.3.2 一起发。
