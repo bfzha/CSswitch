@@ -2,10 +2,12 @@
 
 本文件记待修队列与近期排期。按用户反馈与自测记录，附根因与方向。
 
-> **排期（用户 2026-07-03）**：**v0.2.1 已发布**（Latest，登录热修：修 0.2.0 两处「一键开始走完仍落登录页」缺陷，见 #7 与 CHANGELOG）。此前 v0.2.0（#3 幂等 forge 毕业 + 三轮外审 + 阻止 #6 复发）。#6 待 #6b 做完历史恢复才真正修复毕业。**下个主线（两条，见文末）** = ① 打开 app 即自动起 Science + 后台常驻（issue #3 原生入口，spec 已写、两轮外审已折入、待复审）；② 面板内自定义 OpenAI 兼容端点。
+> **✅ 最新（2026-07-04）：`v0.3.0` 正式版已发布为 Latest**（主题「多 API 支持 + UI 改版」）。自研功能线已 **merge 进 `main`**（`c6e23bc` + 版本 bump `8fa66f3`），真机验收由用户在场完成，本地也已升 0.3.0。**已随本版毕业**：`#8` 多 profile 配置管理、原排期②「面板内自定义 OpenAI 端点」（7 家 provider + 自定义端点已交付）、relay 中转站、DSML 兜底 shim（默认 off）、面板 UI 改版 + 本轮 bug 修（掩码横向溢出 / 自检多 profile 感知 / 去常驻反馈栏）。详见 CHANGELOG `[0.3.0]`。**剩余待办**：① issue #3 原生入口（打开 app 即自动起 Science + 后台常驻，spec 已写、待做）；② 翻译代理移 Rust/axum 拔 python；③ DSML 阶段二 rewrite 前 3 闸门（rewrite 仍默认 off）。
+
+> **排期（历史）**：**v0.2.1**（Latest 曾至 2026-07-04，登录热修：修 0.2.0 两处「一键开始走完仍落登录页」缺陷，见 #7 与 CHANGELOG）。此前 v0.2.0（#3 幂等 forge 毕业 + 三轮外审 + 阻止 #6 复发）。#6 待 #6b 做完历史恢复才真正修复毕业。
 
 > **约定**：已修问题发布后从本文件「毕业」到 [`../CHANGELOG.md`](../CHANGELOG.md)。
-> **v0.2.1 已发布**（2026-07-03，Latest）：登录热修（`sandbox_url` 多行 URL 只取首条 + 健康快捷路径先只读校验登录态），见 #7 / CHANGELOG `[0.2.1]`。此前 **v0.2.0**：#3 运行中再点主按钮幂等分派（幂等 forge：org_uuid 只在真首启铸一次、此后 sticky，健康沙箱不重伪造）+ 三轮 GPT 外审 + 阻止 #6 复发。更早 v0.1.5（#1 文案脱敏）、v0.1.4（node-ectomy、卡死实机修 403→401、正常窗口去托盘）见 CHANGELOG。
+> **v0.3.0 已发布**（2026-07-04，Latest）：多 API 支持 + UI 改版，见顶部横幅 / CHANGELOG `[0.3.0]`。此前 **v0.2.1**（2026-07-03）：登录热修（`sandbox_url` 多行 URL 只取首条 + 健康快捷路径先只读校验登录态），见 #7 / CHANGELOG `[0.2.1]`。此前 **v0.2.0**：#3 运行中再点主按钮幂等分派（幂等 forge：org_uuid 只在真首启铸一次、此后 sticky，健康沙箱不重伪造）+ 三轮 GPT 外审 + 阻止 #6 复发。更早 v0.1.5（#1 文案脱敏）、v0.1.4（node-ectomy、卡死实机修 403→401、正常窗口去托盘）见 CHANGELOG。
 
 ## 1. ✅ 对外文案脱敏（已随 v0.1.5 发布，已毕业）
 
@@ -89,9 +91,7 @@
 
 ## 8. 「API 支持」重架方向：cc-switch 式多 profile 配置 + 代理移 Rust（2026-07-03 定，主线）
 
-> **状态（2026-07-03 更新）：轨道 1（多 profile 配置）实现完成 + 逐块及整体过审 + 全绿 + GPT 二轮外审 7 项全修 + GPT 真机验收发现并已修 P1/P2 + 三轮外审再修护栏隔离/前端 3 项（⚠️全部改动仍在工作树未提交），待用户真机复测 RM-06/RM-04/RM-13，未 merge；轨道 2（代理移 Rust）未做。** 取代原「② 面板内自定义 OpenAI 端点」，升级成 cc-switch 看家的**多配置管理**。
->
-> **⚠️ 更新（2026-07-04）**：本轨多 profile + relay 连同 DSML 兜底 shim 一起作为 **`v0.3.0-beta.2` 大预览版（prerelease）** 发出（用户拍板「发大预览版」）。同日名不副实的 `v0.3.0-beta.1` 已撤回。**本轨此前只在工作树的真机验收/外审修复（+470 行，RM P1/P2 + 护栏隔离）已随 `acdcdd8` 落库并进 beta.2。** 但 **多 profile 仍待用户真机复测 RM-04/06/13、仍未 merge 到 main**：beta.2 是预览，不是稳定版（稳定仍 v0.2.1）。全链记录见 `findings/2026-07-04-codex-review-dsml-wiring-and-beta-status.md`。另：用户明确想收外部 relay PR #4 + WSL2 PR #7，处置见 findings 记录第 4 节。
+> **✅ 状态（2026-07-04）：已随 `v0.3.0` 正式版毕业。** 轨道 1（多 profile 配置管理）实现 + 四轮外审全修 + 真机验收（用户在场）通过 → 连同 relay + DSML + Slice A UX **merge 进 `main`（`c6e23bc`）并发进 `v0.3.0` 正式版（Latest，取代 v0.2.1）**。7 家 provider + 自定义端点已交付，原「② 面板内自定义 OpenAI 端点」并入本轨。**剩余唯一 = 轨道 2（翻译代理移 Rust/axum 拔 python），未做。** 过程记录（beta.1 撤回、beta.2 大预览版、逐轮外审、外部 relay PR #4 / WSL2 PR #7 待议）见 `findings/2026-07-04-codex-review-dsml-wiring-and-beta-status.md`。下方技术细节为历史留存。
 >
 > **GPT 二轮外审 + 修复（2026-07-03，改动只在 `desktop/src-tauri/src/lib.rs` + `desktop/src/main.js`，未 commit）**：复审多 profile 更新链 `45f3304..fdad9ea`。第一轮 5 项：P1-a `start_proxy`/`verify_key` 未过串行器（属实但两命令前端零调用=死命令、竞态不可达，已仍包串行器）、P1-b `set_mode` 与一键并发、P1-c 改代理端口后复用旧沙箱指向死端口、P2-d 非 active 连接编辑不校验、P2-e 回滚失败仍谎称已回滚，**无一触碰铁律**（最坏=孤儿第三方沙箱），全修。第二轮增量 2 项：P1 端口拆链 `let _ = stop_sandbox_inner` 丢结果+先落盘 → 改为**停成功才落盘/停失败返 Err 且端口不变**+前端如实提示；P2 非 active 校验用户选 **truthful-save**（只拦明确 401/403/400/404/422，native/429/5xx/无响应仍保存但据实标「未校验，激活再验」，`update_profile_connection` 回传 `{validated}`）。新增纯函数 `settings_change_needs_teardown`/`rollback_status_clause`/`nonactive_probe_verdict`（均 TDD）。**cargo test 104→107、clippy 0、fmt、node --check、run_all ALL GREEN、gitleaks 0。**
 >
