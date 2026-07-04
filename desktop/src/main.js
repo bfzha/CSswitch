@@ -60,6 +60,35 @@ let target = "local";    // "local" | "remote"
 let currentProfile = null; // RemoteHostProfile | null
 let remoteProfiles = [];   // 缓存的 Profile 列表
 
+// ---- 远程状态机（Plan V2 §5.5）----
+const RemoteState = { DISCONNECTED: 'disconnected', CONNECTING: 'connecting', CONNECTED: 'connected', OPERATING: 'operating', ERROR: 'error' };
+let remoteState = RemoteState.DISCONNECTED;
+
+function setRemoteState(newState, data) {
+  remoteState = newState;
+  const dot = $('#remoteHealthDot');
+  const txt = $('#remoteHealthText');
+  if (!dot || !txt) return;
+  switch (newState) {
+    case RemoteState.DISCONNECTED: dot.className = 'lt a'; txt.textContent = '未连接'; break;
+    case RemoteState.CONNECTING: dot.className = 'lt a pulsing'; txt.textContent = '连接中…'; break;
+    case RemoteState.CONNECTED: dot.className = 'lt g'; txt.textContent = data || '已连接'; break;
+    case RemoteState.OPERATING: txt.textContent = '操作中…'; break;
+    case RemoteState.ERROR: dot.className = 'lt r'; txt.textContent = data || '错误'; break;
+  }
+}
+
+// ---- Toast 通知（Plan V2 §5.6）----
+function showToast(message, type, duration) {
+  type = type || 'info'; duration = duration || 3000;
+  var t = document.createElement('div');
+  t.className = 'toast toast-' + type;
+  t.textContent = message;
+  document.body.appendChild(t);
+  setTimeout(function() { t.classList.add('show'); }, 10);
+  setTimeout(function() { t.classList.remove('show'); setTimeout(function() { t.remove(); }, 300); }, duration);
+}
+
 const KEY_LABELS = { deepseek: "DeepSeek API Key", qwen: "DashScope (通义千问) API Key" };
 
 function setMsg(text, kind) {
