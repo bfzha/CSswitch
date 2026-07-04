@@ -434,6 +434,7 @@ async function loadRemoteProfiles() {
   try {
     remoteProfiles = await call("remote_list_profiles");
     const sel = $('#profileSelect');
+    if (!sel) { console.error('profileSelect element not found'); return; }
     sel.innerHTML = '<option value="">-- 选择服务器 --</option>' +
       remoteProfiles.map(p =>
         `<option value="${p.id}">${p.name} (${p.username}@${p.host}:${p.port})</option>`
@@ -450,7 +451,9 @@ async function loadRemoteProfiles() {
 
 /// Profile 变更时。
 async function onProfileChange() {
-  const id = $('#profileSelect').value;
+  const sel = $('#profileSelect');
+  if (!sel) return;
+  const id = sel.value;
   currentProfile = remoteProfiles.find(p => p.id === id) || null;
   if (currentProfile) {
     setMsg(`已选择 ${currentProfile.name}，正在检查连接…`, null);
@@ -499,6 +502,7 @@ async function checkRemoteHealth() {
 function updateRemoteHealthUI() {
   const dot = $('#remoteHealthDot');
   const txt = $('#remoteHealthText');
+  if (!dot || !txt) return;
   if (currentProfile) {
     dot.className = 'lt a';
     txt.textContent = `已选：${currentProfile.name}`;
