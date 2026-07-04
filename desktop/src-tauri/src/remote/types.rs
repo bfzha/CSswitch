@@ -94,6 +94,8 @@ pub struct RemoteHealth {
 
 /// 发送给远程 Helper 的请求。
 /// 在 serve 模式下，桌面端通过 SSH stdin 逐行发送 JSON 格式的请求。
+/// 当前仅在一次命令模式使用，serve 持久会话模式预留。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteRequest {
@@ -105,6 +107,8 @@ pub struct RemoteRequest {
 
 /// 远程 Helper 返回的响应。
 /// 在 serve 模式下，Helper 通过 SSH stdout 逐行返回 JSON 格式的响应。
+/// serve 持久会话模式预留。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteResponse {
@@ -147,6 +151,8 @@ pub struct RemoteError {
 
 /// Helper 应支持的最少能力集。桌面端通过 capability 检查（而非 semver 比较）
 /// 确认 Helper 版本是否兼容。
+/// 预留给 future 版本兼容性检查逻辑使用。
+#[allow(dead_code)]
 pub const MIN_HELPER_VERSION: &str = "0.3.0";
 
 /// Helper 必须支持的 capability 列表。
@@ -160,6 +166,8 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
 ];
 
 /// Helper 可选 capability（sandbox 在无 Science 的服务器上可能不可用）。
+/// 预留给 future 能力检测和 UI 适配使用。
+#[allow(dead_code)]
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "sandbox", // Claude Science 沙箱管理（需 Science 二进制）
 ];

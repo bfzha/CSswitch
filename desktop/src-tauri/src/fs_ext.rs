@@ -51,6 +51,9 @@ mod imp {
     }
 
     /// Windows: Permissions 只有只读位，mode 操作无意义。
+    /// 此 trait 在其他 crate 模块中被导入使用（config/oauth_forge 等），
+    /// 在 fs_ext 模块内部未直接调用，因此标记 allow(dead_code)。
+    #[allow(dead_code)]
     pub trait PermissionsExt {
         fn from_mode(_mode: u32) -> fs::Permissions;
         fn mode(&self) -> u32;
@@ -100,4 +103,7 @@ mod imp {
 
 // ---------- 公开导出 ----------
 
+// PermissionsExt 在 Unix 上被 config/oauth_forge 测试的 .mode() 调用使用，
+// 在 Windows 上无外部调用方（仅 trait 定义存在）。标记 allow 以免 unused 警告。
+#[allow(unused_imports)]
 pub use imp::{is_executable, open_log_file, set_file_permissions, OpenOptionsExt, PermissionsExt};

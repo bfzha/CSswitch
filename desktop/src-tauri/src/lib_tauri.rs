@@ -3,7 +3,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::fs_ext::{open_log_file, set_file_permissions, PermissionsExt};
+// 跨平台文件权限操作（Unix 设权限，Windows no-op）。
+use crate::fs_ext::{open_log_file, set_file_permissions};
 use serde::Deserialize;
 use serde_json::json;
 use tauri::{Manager, State};
@@ -92,8 +93,10 @@ fn asset_root(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 /// 沙箱可写工作目录（独立 HOME）：`~/.csswitch/sandbox/home`。
+/// 仅 macOS 本地模式有效（依赖 SCIENCE_BIN 和沙箱脚本）。
 /// 打包后资源目录只读，沙箱状态（虚拟登录、克隆运行时、钥匙串）必须落在可写处；
 /// 该路径同时交给 launch/stop 脚本（`SANDBOX_HOME` 环境变量）与取 URL 逻辑，三者一致。
+#[cfg(target_os = "macos")]
 fn sandbox_home() -> PathBuf {
     config::default_dir().join("sandbox").join("home")
 }
@@ -193,6 +196,9 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 // ---------- 代理生命周期核心 ----------
 /// 转义 ERE（extended regex）元字符，让路径按字面参与 `pkill -f` 匹配（避免路径里的
 /// `.`/`(`/`[` 等被当作正则、误配或失配）。
+/// 仅在 Unix 平台的 ensure_proxy 中被调用（pkill 为 Unix 专有）。
+/// 非 Unix 平台未使用，保留以备将来跨平台进程管理需求。
+#[allow(dead_code)]
 fn ere_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -726,10 +732,12 @@ fn one_click_login(
 }
 
 /// 从 `claude-science url` 的 stdout 里取**第一条**合法 http(s) URL。
+/// 仅 macOS 本地模式需要（依赖 `claude-science` 二进制调用）。
 /// Science 的 `url` 命令会输出多行（第一行是真 URL，随后行是「single-use…」说明）；把整段
 /// stdout 当 URL 交给 `open` 会带上换行与说明文字 → 打开错误入口、nonce 不被正确消费 → 落到
 /// `/login`（修 0.2.1 Bug1）。故逐行找第一条以 `http://`/`https://` 开头的行，并只取该行首个
 /// 非空白 token（URL 内不含空白，若同行尾随了说明也被切掉）。找不到返回 None。
+#[cfg(target_os = "macos")]
 fn first_http_url(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let t = line.trim();
@@ -742,8 +750,9 @@ fn first_http_url(stdout: &str) -> Option<String> {
 }
 
 /// 取沙箱 UI 链接：`<bin> url --data-dir <home>/.claude-science`，HOME 指向沙箱 HOME。
+/// 仅 macOS 调用（one_click_login 的 macOS 路径）。非 macOS 平台编译通过但无调用方。
 /// 失败退回 http://127.0.0.1:<port>。沙箱 HOME 用 [`sandbox_home`]（与 launch 时一致）。
-/// 仅 macOS 有效（依赖 Claude Science.app 二进制）；其他平台直接返回端口 URL。
+#[allow(dead_code)]
 fn sandbox_url(port: u16) -> String {
     #[cfg(not(target_os = "macos"))]
     {
@@ -776,7 +785,8 @@ fn sandbox_url(port: u16) -> String {
 /// Science 二进制按【我们的 data-dir】查 `{"running":true}`，这是强身份——不会被恰好占用
 /// `port` 且返回 200 的冒名服务骗过；再叠加端口 /health 确认确实在服务。二进制不在（纯 dev /
 /// 研究者机器）时退化为仅端口探活（原行为）。
-/// 仅 macOS 有效；非 macOS 退化为纯端口探活（无本地 SCIENCE_BIN）。
+/// 仅 macOS 调用（one_click_login/status 的 macOS 路径）。非 macOS 退化为纯端口探活。
+#[allow(dead_code)]
 fn sandbox_running_ours(port: u16) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
@@ -1018,8 +1028,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_http_url, key_fingerprint, redact, sandbox_home};
+    // first_http_url 和 sandbox_home 仅 macOS 编译，测试也仅在 macOS 运行。
+    #[cfg(target_os = "macos")]
+    use super::{first_http_url, sandbox_home};
+    use super::{key_fingerprint, redact};
 
+    /// 测试 URL 解析（仅 macOS，依赖 first_http_url）。
+    #[cfg(target_os = "macos")]
     #[test]
     fn first_http_url_takes_only_first_valid_url() {
         // Science 的 `url` 命令输出两行：第一行是真 URL，第二行是「single-use…」说明。
@@ -1071,6 +1086,8 @@ mod tests {
         assert_ne!(key_fingerprint(""), key_fingerprint("x"));
     }
 
+    /// 测试 sandbox_home 路径（仅 macOS，依赖 sandbox_home 函数）。
+    #[cfg(target_os = "macos")]
     #[test]
     fn sandbox_home_is_writable_under_config_dir() {
         // 沙箱状态目录必须在可写的 ~/.csswitch 下（不在只读的 .app 资源里）——P1-1。

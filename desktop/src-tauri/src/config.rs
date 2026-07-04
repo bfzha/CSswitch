@@ -14,7 +14,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::fs_ext::{set_file_permissions, OpenOptionsExt, PermissionsExt};
+use crate::fs_ext::set_file_permissions;
 
 use serde::{Deserialize, Serialize};
 

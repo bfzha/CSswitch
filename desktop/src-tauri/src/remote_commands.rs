@@ -24,6 +24,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 在当前线程之外的独立 OS 线程中运行一段阻塞代码，通过 channel 取回结果。
 /// 用于 async 上下文中需要执行 SSH（需要 `Send + 'static`）的场景。
+/// 当前所有远程命令已改为 sync fn（由 Tauri 运行时自动分派到线程池），
+/// 此函数预留给将来可能的持久会话模式（serve）或高频轮询场景。
+#[allow(dead_code)]
 fn run_blocking<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
