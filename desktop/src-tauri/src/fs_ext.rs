@@ -10,6 +10,7 @@
 
 #[cfg(unix)]
 mod imp {
+    use std::fs;
     pub use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     pub fn set_file_permissions(path: &std::path::Path, mode: u32) -> std::io::Result<()> {

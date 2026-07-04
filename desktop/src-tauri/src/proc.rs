@@ -5,6 +5,10 @@
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+// Command/Stdio 仅在 Unix 的 which_via_login_shell() 中使用，
+// Windows 上该函数被 #[cfg(unix)] 跳过，但保留 import 避免 Linux 编译报错。
+#[allow(unused_imports)]
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use rand::rngs::OsRng;
