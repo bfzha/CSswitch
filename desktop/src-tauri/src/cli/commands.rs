@@ -5,7 +5,7 @@
 //! Claude Science 沙箱和日志文件。
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
@@ -253,6 +253,7 @@ pub fn cmd_proxy_start(provider: &str, port: u16, secret: &str) -> CliEnvelope {
         if proxy_health(port, secret) {
             return CliEnvelope::err("proxy_already_running", &format!("代理已在端口 {} 上运行", port));
         }
+        let _ = stop_recorded_proxy(port);
         if !clear_unhealthy_proxy_port(port) {
             return CliEnvelope::err_with_hint(
                 "port_in_use",
@@ -369,13 +370,18 @@ pub fn cmd_proxy_status() -> CliEnvelope {
 /// 无状态实现：通过 `fuser` / `lsof` 找到占用端口的进程并 kill。
 pub fn cmd_proxy_stop() -> CliEnvelope {
     let port = get_configured_port();
+    let stopped_recorded = stop_recorded_proxy(port);
 
     // 先检查端口是否有进程
     if !is_port_open(port) {
-        return CliEnvelope::ok(json!({ "message": "端口上没有运行中的代理。", "port": port }));
+        return CliEnvelope::ok(json!({
+            "message": if stopped_recorded { "已停止记录中的代理进程。" } else { "端口上没有运行中的代理。" },
+            "port": port,
+            "stopped": stopped_recorded,
+        }));
     }
 
-    let stopped = clear_unhealthy_proxy_port(port);
+    let stopped = clear_unhealthy_proxy_port(port) || stopped_recorded;
     if stopped {
         super::proc_manager::record_proxy_stop();
         super::logger::info(&format!("proxy stopped on port {port}"));
@@ -390,6 +396,65 @@ pub fn cmd_proxy_stop() -> CliEnvelope {
 // ============================================================================
 // 内部工具函数
 // ============================================================================
+
+fn pid_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn wait_pid_exit(pid: u32) -> bool {
+    for _ in 0..10 {
+        if !pid_running(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+fn terminate_pid(pid: u32) -> bool {
+    if !pid_running(pid) {
+        return true;
+    }
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output();
+    if wait_pid_exit(pid) {
+        return true;
+    }
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output();
+    wait_pid_exit(pid)
+}
+
+fn pid_looks_like_recorded_proxy(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .map(|cmdline| cmdline.contains("csswitch_proxy.py") || cmdline.contains("csswitch_proxy"))
+        .unwrap_or(false)
+}
+
+fn stop_recorded_proxy(port: u16) -> bool {
+    let manager = super::proc_manager::ProcessManager::new("proxy");
+    let Some(record) = manager.read_pid() else {
+        return false;
+    };
+    if record.port != port && !record.command.contains("csswitch_proxy") {
+        return false;
+    }
+    if !pid_looks_like_recorded_proxy(record.pid) {
+        manager.cleanup();
+        return false;
+    }
+    let stopped = terminate_pid(record.pid);
+    if stopped {
+        manager.cleanup();
+    }
+    stopped
+}
 
 fn clear_unhealthy_proxy_port(port: u16) -> bool {
     let _term = Command::new("fuser")
@@ -580,10 +645,18 @@ pub fn cmd_sandbox_start(port: u16, proxy_url: &str) -> CliEnvelope {
         .spawn()
     {
         Ok(_child) => {
-            CliEnvelope::ok(json!({
-                "message": format!("沙箱已启动，端口 {}", port),
-                "port": port,
-            }))
+            match sandbox_fresh_url(&bin, &sandbox_home, &data_dir) {
+                Ok(url) => CliEnvelope::ok(json!({
+                    "message": format!("沙箱已启动，端口 {}", port),
+                    "port": port,
+                    "url": url,
+                })),
+                Err(e) => CliEnvelope::err_with_hint(
+                    "sandbox_url_failed",
+                    &format!("沙箱已启动，但获取访问链接失败：{e}"),
+                    "请稍后重试一键开始，或在服务器上运行 claude-science url 获取新的访问链接。",
+                ),
+            }
         }
         Err(e) => {
             CliEnvelope::err_with_hint(
@@ -593,6 +666,39 @@ pub fn cmd_sandbox_start(port: u16, proxy_url: &str) -> CliEnvelope {
             )
         }
     }
+}
+
+fn sandbox_fresh_url(bin: &str, sandbox_home: &Path, data_dir: &Path) -> Result<String, String> {
+    let mut last_error = String::new();
+    for _ in 0..20 {
+        match Command::new(bin)
+            .args(["url", "--data-dir"])
+            .arg(data_dir)
+            .env("HOME", sandbox_home)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Some(url) = stdout.lines().map(str::trim).find(|line| line.starts_with("http")) {
+                    return Ok(url.to_string());
+                }
+                last_error = "claude-science url 未返回可用 URL".to_string();
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                last_error = if stderr.is_empty() {
+                    format!("claude-science url 退出码 {:?}", out.status.code())
+                } else {
+                    stderr
+                };
+            }
+            Err(e) => {
+                last_error = format!("无法执行 claude-science url：{e}");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(last_error)
 }
 
 /// `sandbox stop` — 停止 Claude Science 沙箱。

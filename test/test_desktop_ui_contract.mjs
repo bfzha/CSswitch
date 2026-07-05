@@ -76,13 +76,22 @@ test("remote one-click backend starts proxy and sandbox and returns access info"
   assert.match(body, /local_url/);
 });
 
-test("remote one-click retries the proxy port when the requested one is occupied", () => {
+test("remote one-click keeps the requested proxy port instead of drifting", () => {
   const m = remoteCommands.match(/pub fn remote_one_click[\s\S]*?\n}\n\n\/\/ ==========================================================================/);
   assert.ok(m, "remote_one_click body should be discoverable");
   const body = m[0];
-  assert.match(body, /for candidate_proxy_port in proxy_port\.\.=proxy_port\.saturating_add\(20\)/);
-  assert.match(body, /e\.code == "port_in_use"/);
-  assert.match(body, /selected_proxy_port/);
+  assert.doesNotMatch(body, /for candidate_proxy_port in proxy_port\.\.=proxy_port\.saturating_add\(20\)/);
+  assert.doesNotMatch(body, /selected_proxy_port/);
+  assert.match(body, /"proxy_port": proxy_port/);
+  assert.match(body, /启动远程代理失败/);
+});
+
+test("remote one-click returns the fresh Science URL from sandbox start", () => {
+  const m = remoteCommands.match(/pub fn remote_one_click[\s\S]*?\n}\n\n\/\/ ==========================================================================/);
+  assert.ok(m, "remote_one_click body should be discoverable");
+  const body = m[0];
+  assert.match(body, /sandbox_result\["url"\]\s*\.as_str\(\)/);
+  assert.match(body, /"local_url": local_url/);
 });
 
 test("remote helper status reports the configured sandbox state", () => {
@@ -101,6 +110,15 @@ test("remote helper sandbox stop is idempotent before requiring Science", () => 
     body.indexOf("if !sandbox_is_running()") < body.indexOf('find_cmd("claude-science")'),
     "not-running sandbox should return ok before requiring the binary",
   );
+});
+
+test("remote helper sandbox start returns a fresh claude-science url", () => {
+  const m = helperCommands.match(/pub fn cmd_sandbox_start[\s\S]*?\n}\n\n\/\/\/ `sandbox stop/);
+  assert.ok(m, "cmd_sandbox_start body should be discoverable");
+  const body = m[0];
+  assert.match(body, /sandbox_fresh_url/);
+  assert.match(body, /\.args\(\["url", "--data-dir"\]\)/);
+  assert.match(body, /"url": url/);
 });
 
 test("remote helper searches user-local binary directories for Science", () => {
@@ -123,6 +141,9 @@ test("remote helper injects relay profile connection fields into proxy env", () 
 
 test("remote helper clears an unhealthy proxy port before spawning a replacement", () => {
   assert.match(helperCommands, /fn clear_unhealthy_proxy_port/);
+  assert.match(helperCommands, /fn stop_recorded_proxy/);
+  assert.match(helperCommands, /pid_looks_like_recorded_proxy/);
+  assert.match(helperCommands, /stop_recorded_proxy\(port\)/);
   assert.match(helperCommands, /clear_unhealthy_proxy_port\(port\)/);
   assert.match(helperCommands, /port_in_use/);
 });
