@@ -17,9 +17,9 @@ use crate::remote::{
 };
 use crate::{config, templates};
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // P1-8 修复：health check 结果缓存，减少频繁 SSH 连接
 lazy_static::lazy_static! {
@@ -78,6 +78,48 @@ pub fn remote_validate_profile(profile: RemoteHostProfile) -> Result<bool, Strin
     remote::validate_profile(&profile).map(|_| true)
 }
 
+/// 保存远程登录信息到系统安全存储。不会写入 remote-hosts.json。
+#[tauri::command]
+pub fn remote_save_login_secret(
+    profile_id: String,
+    kind: String,
+    key_path: Option<String>,
+    secret: String,
+) -> Result<(), String> {
+    if profile_id.trim().is_empty() {
+        return Err("远程服务器 ID 不能为空".to_string());
+    }
+    let credential_kind =
+        remote::credentials::credential_kind_from_parts(&kind, key_path.as_deref())?;
+    remote::credentials::save_secret(&profile_id, credential_kind, &secret)
+}
+
+/// 删除系统安全存储中的远程登录信息。不存在时视为已删除。
+#[tauri::command]
+pub fn remote_delete_login_secret(
+    profile_id: String,
+    kind: String,
+    key_path: Option<String>,
+) -> Result<(), String> {
+    if profile_id.trim().is_empty() {
+        return Err("远程服务器 ID 不能为空".to_string());
+    }
+    let credential_kind =
+        remote::credentials::credential_kind_from_parts(&kind, key_path.as_deref())?;
+    remote::credentials::delete_secret(&profile_id, credential_kind)
+}
+
+#[tauri::command]
+pub fn remote_auth_prompt_respond(
+    session_id: String,
+    request_id: String,
+    secret: Option<String>,
+    cancelled: bool,
+    remember: bool,
+) -> Result<(), String> {
+    remote::askpass::respond(&session_id, &request_id, secret, cancelled, remember)
+}
+
 // ============================================================================
 // 2. 健康检查（SSH，阻塞 I/O）
 // ============================================================================
@@ -104,60 +146,17 @@ pub fn remote_check_health(profile: RemoteHostProfile) -> Result<RemoteHealth, S
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // 快速 SSH 连通性测试（调用 helper status）
-    let reachable = remote::ssh::run_helper_json_simple::<Value>(
-        &profile,
-        &["status".to_string()],
-    )
-    .is_ok();
-
-    let health = if !reachable {
-        RemoteHealth {
-            reachable: false,
-            helper_installed: false,
-            helper_version: None,
-            desktop_version: env!("CARGO_PKG_VERSION").to_string(),
-            compatible: false,
-            platform: None,
-            arch: None,
-            capabilities: vec![],
-            proxy_running: false,
-            sandbox_running: false,
-            last_error: Some(
-                "无法通过 SSH 连接到服务器。请检查地址、端口和认证配置。".to_string(),
-            ),
-            last_check: now,
-        }
-    } else {
-        // 获取详细状态（带重试）
-        let status_result = remote::ssh::run_helper_json_with_retry::<Value>(
-            &profile,
-            &["status".to_string()],
-        );
-
-        match status_result {
-            Ok(status) => parse_health_from_status(&status, now),
-            Err(e) => RemoteHealth {
-                reachable: true,
-                helper_installed: false,
-                helper_version: None,
-                desktop_version: env!("CARGO_PKG_VERSION").to_string(),
-                compatible: false,
-                platform: None,
-                arch: None,
-                capabilities: vec![],
-                proxy_running: false,
-                sandbox_running: false,
-                last_error: Some(format!("Helper 不存在或无法执行：{}", e.message)),
-                last_check: now,
-            },
-        }
-    };
+    let status_result =
+        remote::ssh::run_helper_json_with_retry::<Value>(&profile, &["status".to_string()]);
+    let health = health_from_status_result(status_result, now);
 
     // P1-8 修复：更新缓存
     {
         let mut cache = HEALTH_CACHE.lock().unwrap();
-        cache.insert(profile.id.clone(), (health.clone(), std::time::Instant::now()));
+        cache.insert(
+            profile.id.clone(),
+            (health.clone(), std::time::Instant::now()),
+        );
     }
 
     Ok(health)
@@ -167,22 +166,12 @@ pub fn remote_check_health(profile: RemoteHostProfile) -> Result<RemoteHealth, S
 /// 通过 SSH 执行安装脚本：从 GitHub Releases 下载 helper 二进制到远程服务器。
 #[tauri::command]
 pub fn remote_install_helper(profile: RemoteHostProfile) -> Result<RemoteHealth, String> {
-    // 直接执行 SSH 安装命令（安装脚本为 shell 脚本，不符合 helper JSON 协议格式，
-    // 因此不走 run_helper_json，而是直接执行 ssh 命令并验证退出码和 status 输出）。
-    let args = remote::ssh::build_helper_install_args(&profile);
-    let mut cmd = std::process::Command::new("ssh");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-    let output = cmd.args(&args).output()
-        .map_err(|e| format!("无法启动 SSH：{e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("Helper 安装失败。请确认远程服务器可访问 GitHub：{stderr}"));
-    }
-    // 安装成功后重新检查健康
+    remote::ssh::run_helper_install(&profile).map_err(|e| {
+        format!(
+            "Helper 安装失败。请确认远程服务器可以访问 GitHub：{}",
+            e.message
+        )
+    })?;
     remote_check_health(profile)
 }
 
@@ -221,12 +210,7 @@ pub fn remote_save_provider_key(
 ) -> Result<String, String> {
     let result: Value = remote::ssh::run_helper_json_with_retry::<Value>(
         &profile,
-        &[
-            "config".to_string(),
-            "save-key".to_string(),
-            provider,
-            key,
-        ],
+        &["config".to_string(), "save-key".to_string(), provider, key],
     )
     .map_err(|e| e.message)?;
 
@@ -295,11 +279,7 @@ pub fn remote_start_proxy(
 
     remote::ssh::run_helper_json_with_retry::<Value>(
         &profile,
-        &[
-            "config".to_string(),
-            "set".to_string(),
-            config_json,
-        ],
+        &["config".to_string(), "set".to_string(), config_json],
     )
     .map_err(|e| format!("同步当前 Profile 到服务器失败：{}", e.message))?;
 
@@ -365,11 +345,9 @@ pub fn remote_verify_key(
 /// 返回格式与本地 `status` 命令一致，前端 `refreshStatus()` 无需修改。
 #[tauri::command]
 pub fn remote_status(profile: RemoteHostProfile) -> Result<Value, String> {
-    let status: Value = remote::ssh::run_helper_json_with_retry::<Value>(
-        &profile,
-        &["status".to_string()],
-    )
-    .map_err(|e| e.message)?;
+    let status: Value =
+        remote::ssh::run_helper_json_with_retry::<Value>(&profile, &["status".to_string()])
+            .map_err(|e| e.message)?;
 
     let proxy_running = status["proxy_running"].as_bool().unwrap_or(false);
     let upstream_reachable = status["platform"].as_str().is_some();
@@ -405,7 +383,7 @@ pub fn remote_doctor(profile: RemoteHostProfile) -> Result<Value, String> {
 
 fn remote_tunnel_hint(profile: &RemoteHostProfile, sandbox_port: u16) -> String {
     let mut parts = vec!["ssh".to_string()];
-    if let RemoteAuthMethod::KeyFile { path } = &profile.auth_method {
+    if let RemoteAuthMethod::KeyFile { path, .. } = &profile.auth_method {
         parts.push("-i".to_string());
         parts.push(path.clone());
     }
@@ -433,11 +411,7 @@ pub fn remote_one_click(
 
     remote::ssh::run_helper_json_with_retry::<Value>(
         &profile,
-        &[
-            "config".to_string(),
-            "set".to_string(),
-            config_json,
-        ],
+        &["config".to_string(), "set".to_string(), config_json],
     )
     .map_err(|e| format!("同步当前 Profile 到服务器失败：{}", e.message))?;
 
@@ -500,10 +474,54 @@ pub fn remote_one_click(
 // ============================================================================
 
 /// 将 Helper 的 `status` 命令返回值解析为 `RemoteHealth` 结构。
+fn health_from_status_result(
+    status_result: Result<Value, remote::RemoteError>,
+    now: i64,
+) -> RemoteHealth {
+    match status_result {
+        Ok(status) => parse_health_from_status(&status, now),
+        Err(e) if e.code == "helper_not_found" => RemoteHealth {
+            reachable: true,
+            helper_installed: false,
+            helper_version: None,
+            desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+            compatible: false,
+            platform: None,
+            arch: None,
+            capabilities: vec![],
+            proxy_running: false,
+            sandbox_running: false,
+            last_error: Some(format!("Helper 不存在或无法执行：{}", e.message)),
+            last_check: now,
+        },
+        Err(e) => RemoteHealth {
+            reachable: false,
+            helper_installed: false,
+            helper_version: None,
+            desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+            compatible: false,
+            platform: None,
+            arch: None,
+            capabilities: vec![],
+            proxy_running: false,
+            sandbox_running: false,
+            last_error: Some(format!(
+                "无法通过 SSH 连接到服务器。请检查地址、端口和认证配置：{}",
+                e.message
+            )),
+            last_check: now,
+        },
+    }
+}
+
 fn parse_health_from_status(status: &Value, now: i64) -> RemoteHealth {
     let capabilities: Vec<String> = status["capabilities"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     // 兼容性检查：所需能力是否齐全
@@ -524,5 +542,40 @@ fn parse_health_from_status(status: &Value, now: i64) -> RemoteHealth {
         sandbox_running: status["sandbox_running"].as_bool().unwrap_or(false),
         last_error: None,
         last_check: now,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote_error(code: &str, message: &str) -> remote::RemoteError {
+        remote::RemoteError {
+            code: code.to_string(),
+            message: message.to_string(),
+            details: None,
+            recoverable: false,
+            suggestion: None,
+        }
+    }
+
+    #[test]
+    fn health_from_helper_missing_keeps_server_reachable() {
+        let health =
+            health_from_status_result(Err(remote_error("helper_not_found", "missing helper")), 123);
+
+        assert!(health.reachable);
+        assert!(!health.helper_installed);
+        assert_eq!(health.last_check, 123);
+    }
+
+    #[test]
+    fn health_from_auth_error_marks_server_unreachable() {
+        let health =
+            health_from_status_result(Err(remote_error("ssh_auth_failed", "bad password")), 123);
+
+        assert!(!health.reachable);
+        assert!(!health.helper_installed);
+        assert_eq!(health.last_check, 123);
     }
 }
