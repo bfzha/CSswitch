@@ -95,6 +95,23 @@ test("remote profile save prepares helper before saving the server", () => {
   );
 });
 
+test("remote password login has an explicit password field and stores it outside the profile", () => {
+  assert.match(html, /id="passwordGroup"/);
+  assert.match(html, /<input(?=[^>]*id="editProfilePassword")(?=[^>]*type="password")[^>]*>/);
+  assert.match(html, /id="keyFileGroup"/);
+
+  assert.match(main, /"editProfilePassword"/);
+  assert.match(main, /"passwordGroup"/);
+  assert.match(main, /function toggleAuthFields\(\)/);
+  assert.match(main, /passwordGroup\.style\.display\s*=\s*method === "password"/);
+  assert.match(main, /keyFileGroup\.style\.display\s*=\s*method === "key_file"/);
+  assert.match(main, /call\(["']remote_save_login_secret["']/);
+  assert.match(main, /call\(["']remote_delete_login_secret["']/);
+  assert.match(main, /editProfilePassword\.value\s*=\s*""/);
+  assert.doesNotMatch(main, /authMethod,\s*password/i);
+  assert.doesNotMatch(main, /password:\s*els\.editProfilePassword/);
+});
+
 test("remote one-click does not repeat helper preparation", () => {
   const body = main.match(/async function remoteOneClick\(\) \{[\s\S]*?\n\}/);
   assert.ok(body, "remoteOneClick body should be discoverable");

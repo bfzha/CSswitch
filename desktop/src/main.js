@@ -130,6 +130,9 @@ function mockInvoke(cmd, args) {
     case "remote_delete_profile":
       mockStore.remoteProfiles = mockStore.remoteProfiles.filter((p) => p.id !== args.id);
       return Promise.resolve(true);
+    case "remote_save_login_secret":
+    case "remote_delete_login_secret":
+      return Promise.resolve(null);
     case "remote_check_health":
       return Promise.resolve({ reachable: true, helperInstalled: false, compatible: false, platform: "linux", arch: "x86_64", proxyRunning: false, sandboxRunning: false, lastError: "预览模式" });
     case "remote_prepare_helper":
@@ -849,10 +852,12 @@ function openProfileEdit(id) {
   els.editProfileUsername.value = p ? p.username : "";
   const auth = p && p.authMethod ? p.authMethod : { type: "recommended" };
   els.editProfileAuth.value = authSelectValue(auth);
+  els.profileEditModal.dataset.passwordAuth = authSelectValue(auth) === "password" ? "1" : "0";
+  els.editProfilePassword.value = "";
   els.editProfileKeyPath.value = auth.path || "~/.ssh/id_ed25519";
   els.editProfileHelperPath.value = p ? p.helperPath : "~/.csswitch/bin/csswitch-helper";
   els.profileEditMsg.textContent = "";
-  toggleKeyFileGroup();
+  toggleAuthFields();
   els.profileEditModal.style.display = "flex";
 }
 
@@ -860,8 +865,16 @@ function closeProfileEdit() {
   els.profileEditModal.style.display = "none";
 }
 
-function toggleKeyFileGroup() {
-  els.keyFileGroup.style.display = els.editProfileAuth.value === "key_file" ? "" : "none";
+function toggleAuthFields() {
+  const method = els.editProfileAuth.value;
+  els.passwordGroup.style.display = method === "password" ? "" : "none";
+  els.keyFileGroup.style.display = method === "key_file" ? "" : "none";
+  els.editProfilePassword.placeholder = els.profileEditModal.dataset.passwordAuth === "1"
+    ? "留空则不修改已保存密码"
+    : "请输入服务器密码";
+  if (method !== "password") {
+    els.editProfilePassword.value = "";
+  }
 }
 
 function authSelectValue(auth) {
@@ -915,6 +928,38 @@ function buildAuthMethodFromForm() {
     allowVerificationCode: true,
     rememberConnection: true,
   };
+}
+
+function passwordSecretFromForm(requirePassword) {
+  if (els.editProfileAuth.value !== "password") return null;
+  const secret = els.editProfilePassword.value;
+  if (!secret && requirePassword) {
+    throw new Error("请填写服务器密码。");
+  }
+  return secret ? { kind: "password", keyPath: null, secret } : null;
+}
+
+function passwordRequiredForCurrentProfile(authMethod) {
+  return authMethod.type === "password" && els.profileEditModal.dataset.passwordAuth !== "1";
+}
+
+async function saveRemoteLoginSecret(profileId, loginSecret) {
+  if (!loginSecret) return;
+  await call("remote_save_login_secret", {
+    profileId,
+    kind: loginSecret.kind,
+    keyPath: loginSecret.keyPath,
+    secret: loginSecret.secret,
+  });
+}
+
+async function deleteRemoteLoginSecret(profileId, loginSecret) {
+  if (!loginSecret) return;
+  await call("remote_delete_login_secret", {
+    profileId,
+    kind: loginSecret.kind,
+    keyPath: loginSecret.keyPath,
+  });
 }
 
 function authPromptCopy(kind) {
@@ -1013,16 +1058,19 @@ function newRemoteId() {
 
 async function saveProfile() {
   const editId = els.profileEditModal.dataset.editId;
+  const profileId = editId || newRemoteId();
   let authMethod;
+  let loginSecret;
   try {
     authMethod = buildAuthMethodFromForm();
+    loginSecret = passwordSecretFromForm(passwordRequiredForCurrentProfile(authMethod));
   } catch (e) {
     els.profileEditMsg.textContent = e.message || String(e);
     els.profileEditMsg.className = "msg err";
     return;
   }
   const profile = {
-    id: editId || newRemoteId(),
+    id: profileId,
     name: els.editProfileName.value.trim() || "未命名",
     host: els.editProfileHost.value.trim(),
     port: parseInt(els.editProfilePort.value, 10) || 22,
@@ -1035,31 +1083,44 @@ async function saveProfile() {
     els.profileEditMsg.className = "msg err";
     return;
   }
+  let savedLoginSecret = false;
   try {
     els.profileEditMsg.textContent = "正在准备远程 Helper…";
     els.profileEditMsg.className = "msg";
+    if (loginSecret) {
+      await saveRemoteLoginSecret(profile.id, loginSecret);
+      savedLoginSecret = true;
+    }
     await call("remote_prepare_helper", { profile });
     await call("remote_save_profile", { profile });
+    els.editProfilePassword.value = "";
     closeProfileEdit();
     await openProfileModal();
     await loadRemoteProfiles();
   } catch (e) {
+    if (savedLoginSecret && !editId) {
+      await deleteRemoteLoginSecret(profile.id, loginSecret).catch(() => {});
+    }
     els.profileEditMsg.textContent = "保存失败：" + e;
     els.profileEditMsg.className = "msg err";
   }
 }
 
 async function testProfileConnection() {
+  const editId = els.profileEditModal.dataset.editId;
   let authMethod;
+  let loginSecret;
   try {
     authMethod = buildAuthMethodFromForm();
+    loginSecret = passwordSecretFromForm(passwordRequiredForCurrentProfile(authMethod));
   } catch (e) {
     els.profileEditMsg.textContent = e.message || String(e);
     els.profileEditMsg.className = "msg err";
     return;
   }
+  const temporarySecret = !!loginSecret;
   const profile = {
-    id: "_test_",
+    id: temporarySecret ? "_test_" : (editId || "_test_"),
     name: "test",
     host: els.editProfileHost.value.trim(),
     port: parseInt(els.editProfilePort.value, 10) || 22,
@@ -1070,6 +1131,9 @@ async function testProfileConnection() {
   els.testProfileBtn.disabled = true;
   els.profileEditMsg.textContent = "正在测试连接并准备远程 Helper…";
   try {
+    if (loginSecret) {
+      await saveRemoteLoginSecret(profile.id, loginSecret);
+    }
     const h = await call("remote_prepare_helper", { profile });
     const ready = h.reachable && h.helperInstalled && h.compatible;
     els.profileEditMsg.textContent = ready ? "连接成功，Helper 已就绪。" : (h.lastError || "连接成功，但 Helper 未就绪");
@@ -1078,6 +1142,9 @@ async function testProfileConnection() {
     els.profileEditMsg.textContent = "连接失败：" + e;
     els.profileEditMsg.className = "msg err";
   } finally {
+    if (temporarySecret) {
+      await deleteRemoteLoginSecret(profile.id, loginSecret).catch(() => {});
+    }
     els.testProfileBtn.disabled = false;
   }
 }
@@ -1127,8 +1194,8 @@ function wire() {
     "manageProfilesBtn", "remoteHealthDot", "remoteHealthText", "profileModal", "addProfileBtn",
     "closeProfileModal", "profileEditModal", "profileEditTitle", "editProfileName",
     "editProfileHost", "editProfilePort", "editProfileUsername", "editProfileAuth",
-    "editProfileKeyPath", "editProfileHelperPath", "keyFileGroup", "testProfileBtn",
-    "saveProfileBtn", "cancelProfileEditBtn", "profileEditMsg", "authPromptModal",
+    "editProfilePassword", "editProfileKeyPath", "editProfileHelperPath", "passwordGroup",
+    "keyFileGroup", "testProfileBtn", "saveProfileBtn", "cancelProfileEditBtn", "profileEditMsg", "authPromptModal",
     "authPromptTitle", "authPromptLabel", "authPromptInput", "authPromptRememberRow",
     "authPromptRemember", "authPromptSubmitBtn", "authPromptCancelBtn", "authPromptMsg",
   ].forEach((id) => { els[id] = $(id); });
@@ -1196,7 +1263,7 @@ function wire() {
   els.saveProfileBtn.addEventListener("click", saveProfile);
   els.cancelProfileEditBtn.addEventListener("click", closeProfileEdit);
   els.testProfileBtn.addEventListener("click", testProfileConnection);
-  els.editProfileAuth.addEventListener("change", toggleKeyFileGroup);
+  els.editProfileAuth.addEventListener("change", toggleAuthFields);
   els.authPromptSubmitBtn.addEventListener("click", submitAuthPrompt);
   els.authPromptCancelBtn.addEventListener("click", cancelAuthPrompt);
   els.authPromptInput.addEventListener("keydown", (e) => {

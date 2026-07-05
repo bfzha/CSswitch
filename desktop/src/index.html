@@ -72,13 +72,18 @@
             <label>用户名 <span style="color:var(--red)">*</span></label>
             <input type="text" id="editProfileUsername" placeholder="root" />
 
-            <label>认证方式</label>
+            <label>登录方式</label>
             <select id="editProfileAuth">
               <option value="recommended">推荐登录</option>
               <option value="password">用密码</option>
               <option value="key_file">密钥文件</option>
-              <option value="saved_keys">已保存密钥</option>
+              <option value="saved_keys">电脑里的密钥</option>
             </select>
+
+            <div id="passwordGroup" style="display:none">
+              <label>服务器密码 <span style="color:var(--red)">*</span></label>
+              <input type="password" id="editProfilePassword" placeholder="请输入服务器密码" autocomplete="off" />
+            </div>
 
             <div id="keyFileGroup" style="display:none">
               <label>密钥路径 <span style="color:var(--red)">*</span></label>
