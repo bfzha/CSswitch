@@ -16,6 +16,12 @@ function remoteStartProxyBody() {
   return m[0];
 }
 
+function workflowJob(name) {
+  const m = buildWorkflow.match(new RegExp(`\\n  ${name}:\\n[\\s\\S]*?(?=\\n  [a-zA-Z0-9_-]+:\\n|\\n$)`));
+  assert.ok(m, `${name} job should exist`);
+  return m[0];
+}
+
 test("desktop profile UI script matches the v2 profile HTML", () => {
   assert.match(html, /id="profileList"/);
   assert.match(html, /id="newBtn"/);
@@ -127,6 +133,16 @@ test("desktop bundle and release workflow provide linux helper assets for upload
   assert.match(tauriConf, /helper-assets/);
   assert.match(buildWorkflow, /csswitch-helper-linux-\$\{\{ matrix\.asset_arch \}\}/);
   assert.match(buildWorkflow, /helper-assets/);
+});
+
+test("macOS desktop builds bundle the linux helper assets too", () => {
+  const body = workflowJob("build-macos");
+  assert.match(body, /needs: build-helper/);
+  assert.match(body, /Download Linux Helper Assets/);
+  assert.match(body, /pattern: csswitch-helper-linux-\*/);
+  assert.match(body, /path: desktop\/src-tauri\/helper-assets/);
+  assert.match(body, /npx tauri build --target \$\{\{ matrix\.target \}\} --bundler dmg/);
+  assert.match(buildWorkflow, /CSSwitch-macOS-\*/);
 });
 
 test("remote one-click backend starts proxy and sandbox and returns access info", () => {
