@@ -26,7 +26,12 @@ fn configure_bundled_proxy_dir() {
     let proxy_dir_str = proxy_dir.to_string_lossy().replace('\\', "/");
 
     println!("cargo:rerun-if-env-changed=CSSWITCH_BUNDLED_PROXY_DIR");
-    for resource in ["csswitch_proxy.py", "dsml_shim.py"] {
+    for resource in [
+        "csswitch_proxy.py",
+        "dsml_shim.py",
+        "provider_policy.py",
+        "anthropic_compat.py",
+    ] {
         require_bundled_proxy_file(&proxy_dir, resource);
         println!(
             "cargo:rerun-if-changed={}",

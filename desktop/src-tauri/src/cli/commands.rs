@@ -19,6 +19,14 @@ const BUNDLED_PROXY: &str = include_str!(concat!(
 ));
 const BUNDLED_DSML_SHIM: &str =
     include_str!(concat!(env!("CSSWITCH_BUNDLED_PROXY_DIR"), "/dsml_shim.py"));
+const BUNDLED_PROVIDER_POLICY: &str = include_str!(concat!(
+    env!("CSSWITCH_BUNDLED_PROXY_DIR"),
+    "/provider_policy.py"
+));
+const BUNDLED_ANTHROPIC_COMPAT: &str = include_str!(concat!(
+    env!("CSSWITCH_BUNDLED_PROXY_DIR"),
+    "/anthropic_compat.py"
+));
 const MANAGED_PROXY_HINT: &str = "~/.csswitch/proxy/csswitch_proxy.py";
 const REAL_SCIENCE_PORT: u16 = 8765;
 
@@ -82,7 +90,11 @@ fn ensure_managed_proxy_script() -> Result<PathBuf, String> {
     fs::create_dir_all(parent).map_err(|e| format!("创建 ~/.csswitch/proxy 失败：{e}"))?;
 
     let shim = managed_proxy_file("dsml_shim.py");
+    let provider_policy = managed_proxy_file("provider_policy.py");
+    let anthropic_compat = managed_proxy_file("anthropic_compat.py");
     write_managed_proxy_file(&shim, BUNDLED_DSML_SHIM.as_bytes())?;
+    write_managed_proxy_file(&provider_policy, BUNDLED_PROVIDER_POLICY.as_bytes())?;
+    write_managed_proxy_file(&anthropic_compat, BUNDLED_ANTHROPIC_COMPAT.as_bytes())?;
     write_managed_proxy_file(&main, BUNDLED_PROXY.as_bytes())?;
     Ok(main)
 }

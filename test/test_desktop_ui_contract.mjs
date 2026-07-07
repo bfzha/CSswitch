@@ -533,10 +533,26 @@ test("remote helper carries and installs the managed proxy script", () => {
     helperCommands,
     /include_str!\(concat!\([\s\S]*env!\("CSSWITCH_BUNDLED_PROXY_DIR"\)[\s\S]*"\/dsml_shim\.py"[\s\S]*\)\)/,
   );
+  assert.match(
+    helperCommands,
+    /include_str!\(concat!\([\s\S]*env!\("CSSWITCH_BUNDLED_PROXY_DIR"\)[\s\S]*"\/provider_policy\.py"[\s\S]*\)\)/,
+  );
+  assert.match(
+    helperCommands,
+    /include_str!\(concat!\([\s\S]*env!\("CSSWITCH_BUNDLED_PROXY_DIR"\)[\s\S]*"\/anthropic_compat\.py"[\s\S]*\)\)/,
+  );
   assert.match(helperCommands, /fn ensure_managed_proxy_script\(\) -> Result<PathBuf, String>/);
   assert.match(helperCommands, /"~\/\.csswitch\/proxy\/csswitch_proxy\.py"/);
   assert.match(helperCommands, /dsml_shim\.py/);
+  assert.match(helperCommands, /provider_policy\.py/);
+  assert.match(helperCommands, /anthropic_compat\.py/);
   assert.match(helperCommands, /BUNDLED_PROXY/);
+});
+
+test("desktop build requires every Python module imported by the managed proxy", () => {
+  for (const file of ["csswitch_proxy.py", "dsml_shim.py", "provider_policy.py", "anthropic_compat.py"]) {
+    assert.match(tauriBuildRs, new RegExp(`"${file.replace(".", "\\.")}"`));
+  }
 });
 
 test("remote helper prefers the self-healed managed proxy bundle after explicit overrides", () => {
