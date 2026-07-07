@@ -80,9 +80,14 @@ test("remote start uploads the active local profile before starting helper proxy
 });
 
 test("remote start stops stale helper proxy before starting with the new secret", () => {
+  const body = remoteStartProxyBody();
   assert.match(
-    remoteStartProxyBody(),
-    /"proxy"\.to_string\(\),\s*"stop"\.to_string\(\)[\s\S]*"proxy"\.to_string\(\),\s*"start"\.to_string\(\)/,
+    body,
+    /stop_remote_proxy\(&profile\)[\s\S]*"proxy"\.to_string\(\),\s*"start"\.to_string\(\)/,
+  );
+  assert.ok(
+    body.indexOf("stop_remote_proxy(&profile)") < body.indexOf('"config".to_string()'),
+    "remote_start_proxy must stop the old configured proxy before writing the new port",
   );
 });
 
@@ -220,11 +225,14 @@ test("wsl github helper installer downloads release asset instead of only checki
   assert.doesNotMatch(installer[0], /Helper not installed/);
 });
 
-test("helper release repo defaults to fork and supports env override", () => {
+test("helper release repo is detected without a static default", () => {
   assert.match(remoteSsh, /CSSWITCH_HELPER_RELEASE_REPO/);
-  assert.match(remoteSsh, /bfzha\/CSswitch/);
-  assert.match(remoteSsh, /SuperJJ007\/CSswitch/);
-  assert.match(remoteSsh, /merged upstream|合并回上游|upstream/i);
+  assert.doesNotMatch(remoteSsh, /const\s+HELPER_RELEASE_REPO\s*:/);
+  assert.doesNotMatch(remoteSsh, /"bfzha\/CSswitch"/);
+  assert.match(remoteSsh, /resolve_helper_release_repo_from/);
+  assert.match(remoteSsh, /option_env!\("GITHUB_REPOSITORY"\)/);
+  assert.match(remoteSsh, /git_origin_remote/);
+  assert.match(remoteSsh, /helper_release_repo_unknown/);
 });
 
 test("saving remote profile fails before persisting when helper preparation fails", () => {
@@ -367,7 +375,7 @@ test("macOS one-click command keeps app and state names available under cfg", ()
   assert.match(body, /state: State<'_, Mutex<AppState>>/);
   assert.doesNotMatch(body, /_app: tauri::AppHandle/);
   assert.doesNotMatch(body, /_state: State<'_, Mutex<AppState>>/);
-  assert.match(body, /ensure_proxy\(&app, &state\)/);
+  assert.match(body, /ensure_proxy\(&app, &state, &lifecycle\)/);
   assert.match(body, /stop_sandbox_inner\(&app, &mut st\)/);
   assert.match(body, /asset_root\(&app\)/);
 });
@@ -386,8 +394,17 @@ test("remote one-click backend starts proxy and sandbox and returns access info"
   assert.ok(m, "remote_one_click body should be discoverable");
   const body = m[0];
   assert.match(body, /remote_active_config_for_start/);
-  assert.match(body, /"proxy"\.to_string\(\),\s*"stop"\.to_string\(\)[\s\S]*"proxy"\.to_string\(\),\s*"start"\.to_string\(\)/);
-  assert.match(body, /"sandbox"\.to_string\(\),\s*"stop"\.to_string\(\)[\s\S]*"sandbox"\.to_string\(\),\s*"start"\.to_string\(\)/);
+  assert.match(body, /stop_remote_proxy\(&profile\)[\s\S]*"proxy"\.to_string\(\),\s*"start"\.to_string\(\)/);
+  assert.match(body, /stop_remote_sandbox\(&profile\)[\s\S]*"sandbox"\.to_string\(\),\s*"start"\.to_string\(\)/);
+  assert.match(body, /stop_remote_proxy\(&profile\)/);
+  assert.ok(
+    body.indexOf("stop_remote_sandbox(&profile)") < body.indexOf('"config".to_string()'),
+    "remote_one_click must stop the old sandbox before writing new ports",
+  );
+  assert.ok(
+    body.indexOf("stop_remote_proxy(&profile)") < body.indexOf('"config".to_string()'),
+    "remote_one_click must stop the old proxy before writing new ports",
+  );
   assert.match(body, /proxy_url/);
   assert.match(body, /tunnel_hint/);
   assert.match(body, /local_url/);
@@ -442,15 +459,12 @@ test("remote stop button stops remote sandbox and proxy", () => {
   assert.match(body, /远程代理与沙箱已停止/);
 });
 
-test("remote stop-all backend stops sandbox before proxy", () => {
+test("remote stop-all backend stops sandbox and proxy without serial delay", () => {
   const m = remoteCommands.match(/pub fn remote_stop_all[\s\S]*?\n}\n\n\/\/\/ 查询远程代理状态/);
   assert.ok(m, "remote_stop_all body should be discoverable");
   const body = m[0];
-  assert.match(body, /"sandbox"\.to_string\(\),\s*"stop"\.to_string\(\)[\s\S]*"proxy"\.to_string\(\),\s*"stop"\.to_string\(\)/);
-  assert.ok(
-    body.indexOf('"sandbox".to_string()') < body.indexOf('"proxy".to_string()'),
-    "remote_stop_all should stop sandbox before proxy",
-  );
+  assert.match(body, /std::thread::spawn[\s\S]*stop_remote_sandbox/);
+  assert.match(body, /let proxy_res = stop_remote_proxy\(&profile\)/);
   assert.match(body, /远程代理已停；但停止远程沙箱失败/);
 });
 

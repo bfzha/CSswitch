@@ -84,7 +84,8 @@ impl ProcessManager {
                     .unwrap_or(false);
                 if exists {
                     // 进一步验证 PID 匹配（避免 PID 复用导致的误判）
-                    if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", record.pid)) {
+                    if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", record.pid))
+                    {
                         // cmdline 用 \0 分隔，取第一个 token 作为命令名
                         let cmd_name = cmdline.split('\0').next().unwrap_or("");
                         if cmd_name.contains("python") || cmd_name.contains("claude-science") {
@@ -184,8 +185,7 @@ mod tests {
     use std::fs;
 
     fn tmp_dir() -> PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("csswitch-proc-test-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("csswitch-proc-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&d);
         d
     }

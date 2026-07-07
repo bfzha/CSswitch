@@ -195,6 +195,11 @@ pub fn build_wsl_args(profile: &RemoteHostProfile, helper_args: &[String]) -> Ve
     build_wsl_shell_args(profile, &helper_cmd)
 }
 
+pub fn build_wsl_stdin_args(profile: &RemoteHostProfile) -> Vec<String> {
+    let helper_cmd = format!("{} --json serve", ssh::shell_quote(&profile.helper_path));
+    build_wsl_shell_args(profile, &helper_cmd)
+}
+
 fn build_wsl_shell_args(profile: &RemoteHostProfile, script: &str) -> Vec<String> {
     let distro = profile.distribution.as_deref().unwrap_or_default();
     let mut args = vec!["-d".to_string(), distro.to_string()];
@@ -263,6 +268,59 @@ pub fn run_helper_json_with_retry<T: DeserializeOwned>(
     )
 }
 
+pub fn run_helper_json_stdin_with_retry<T: DeserializeOwned>(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+) -> Result<T, RemoteError> {
+    run_helper_json_stdin(
+        profile,
+        helper_args,
+        ssh::DEFAULT_CMD_TIMEOUT_SECS,
+        ssh::DEFAULT_RETRIES,
+    )
+}
+
+fn run_helper_json_stdin<T: DeserializeOwned>(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+    timeout_secs: u64,
+    retries: u32,
+) -> Result<T, RemoteError> {
+    let mut last_error: Option<RemoteError> = None;
+
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            let delay = Duration::from_secs(2u64.saturating_mul(1 << (attempt - 1)));
+            std::thread::sleep(delay);
+        }
+
+        match try_run_wsl_stdin(profile, helper_args, timeout_secs) {
+            Ok(stdout) => match ssh::parse_helper_response::<T>(&stdout) {
+                Ok(data) => return Ok(data),
+                Err(e) => {
+                    last_error = Some(e);
+                    break;
+                }
+            },
+            Err(e) => {
+                let recoverable = e.recoverable;
+                last_error = Some(e);
+                if !recoverable {
+                    break;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| RemoteError {
+        code: "wsl_unknown".to_string(),
+        message: "未知 WSL 错误".to_string(),
+        details: None,
+        recoverable: false,
+        suggestion: Some("请查看日志或在终端运行 wsl.exe 验证。".to_string()),
+    }))
+}
+
 pub fn run_helper_json_slow<T: DeserializeOwned>(
     profile: &RemoteHostProfile,
     helper_args: &[String],
@@ -297,10 +355,7 @@ pub fn detect_remote_platform(
 
 pub fn run_helper_install(profile: &RemoteHostProfile) -> Result<String, RemoteError> {
     let helper_path = ssh::shell_quote(&profile.helper_path);
-    let repo = std::env::var(ssh::HELPER_RELEASE_REPO_ENV)
-        .ok()
-        .and_then(|v| ssh::validate_repo_format(&v).map(String::from))
-        .unwrap_or_else(|| ssh::HELPER_RELEASE_REPO.to_string());
+    let repo = ssh::resolve_helper_release_repo()?;
     let helper_version = env!("CARGO_PKG_VERSION");
     let script = format!(
         r#"set -e
@@ -426,6 +481,37 @@ fn try_run_wsl(
         recoverable: false,
         suggestion: Some("请确认 Windows Subsystem for Linux 已安装。".to_string()),
     })?;
+    collect_wsl_output(profile, child, timeout_secs)
+}
+
+fn try_run_wsl_stdin(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+    timeout_secs: u64,
+) -> Result<String, RemoteError> {
+    let args = build_wsl_stdin_args(profile);
+    let payload = ssh::helper_stdin_payload(helper_args)?;
+    let mut command = ssh::hide_cmd(Command::new(WSL_EXE));
+    command.args(&args);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| RemoteError {
+        code: "wsl_spawn_failed".to_string(),
+        message: format!("无法启动 wsl.exe：{e}"),
+        details: None,
+        recoverable: false,
+        suggestion: Some("请确认 Windows Subsystem for Linux 已安装。".to_string()),
+    })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&payload).map_err(|e| RemoteError {
+            code: "wsl_stdin_failed".to_string(),
+            message: format!("写入 WSL 命令 stdin 失败：{e}"),
+            details: None,
+            recoverable: true,
+            suggestion: Some("请确认 WSL 发行版、Linux 用户和 Helper 路径权限正确。".to_string()),
+        })?;
+    }
     collect_wsl_output(profile, child, timeout_secs)
 }
 
@@ -735,6 +821,16 @@ mod tests {
                 "~/.csswitch/bin/csswitch-helper --json status"
             ]
         );
+    }
+
+    #[test]
+    fn stdin_helper_args_do_not_put_payload_on_wsl_command_line() {
+        let profile = wsl_profile();
+        let args = build_wsl_stdin_args(&profile);
+        let joined = args.join(" ");
+        assert!(joined.contains("--json serve"));
+        assert!(!joined.contains("sk-secret"));
+        assert!(!joined.contains("config set"));
     }
 
     #[test]

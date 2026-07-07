@@ -18,6 +18,16 @@ pub fn run_helper_json_with_retry<T: DeserializeOwned>(
     }
 }
 
+pub fn run_helper_json_stdin_with_retry<T: DeserializeOwned>(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+) -> Result<T, RemoteError> {
+    match profile.kind {
+        RemoteTargetKind::Ssh => ssh::run_helper_json_stdin_with_retry(profile, helper_args),
+        RemoteTargetKind::Wsl => wsl::run_helper_json_stdin_with_retry(profile, helper_args),
+    }
+}
+
 pub fn run_helper_json_slow<T: DeserializeOwned>(
     profile: &RemoteHostProfile,
     helper_args: &[String],
@@ -45,7 +55,9 @@ pub fn install_helper_from_stdin(
     }
 }
 
-pub fn detect_remote_platform(profile: &RemoteHostProfile) -> Result<(String, String), RemoteError> {
+pub fn detect_remote_platform(
+    profile: &RemoteHostProfile,
+) -> Result<(String, String), RemoteError> {
     match profile.kind {
         RemoteTargetKind::Ssh => ssh::detect_remote_platform(profile),
         RemoteTargetKind::Wsl => wsl::detect_remote_platform(profile),

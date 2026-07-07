@@ -31,8 +31,7 @@ pub fn classify_prompt(prompt: &str) -> PromptKind {
         "短信验证",
         "手机验证",
     ];
-    if verification_words.iter().any(|word| lower.contains(word))
-    {
+    if verification_words.iter().any(|word| lower.contains(word)) {
         return PromptKind::VerificationCode;
     }
     if lower.contains("passphrase") || prompt.contains("密钥密码") {

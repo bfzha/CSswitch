@@ -357,8 +357,10 @@ fn try_auto_response(session_dir: &Path, request: &AskpassRequest) -> Result<(),
 fn write_transient_password(session_dir: impl AsRef<Path>, secret: &str) -> Result<(), String> {
     let session_dir = session_dir.as_ref();
     ensure_dirs(session_dir)?;
-    fs::write(transient_password_path(session_dir), secret)
-        .map_err(|e| format!("写入临时登录密码失败：{e}"))
+    let path = transient_password_path(session_dir);
+    fs::write(&path, secret).map_err(|e| format!("写入临时登录密码失败：{e}"))?;
+    crate::fs_ext::set_file_permissions(&path, 0o600)
+        .map_err(|e| format!("设置临时登录密码权限失败：{e}"))
 }
 
 fn read_transient_password(session_dir: &Path) -> Option<String> {
@@ -396,6 +398,12 @@ fn ensure_dirs(session_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("无法创建登录请求目录：{e}"))?;
     fs::create_dir_all(responses_dir(session_dir))
         .map_err(|e| format!("无法创建登录响应目录：{e}"))?;
+    crate::fs_ext::set_file_permissions(session_dir, 0o700)
+        .map_err(|e| format!("设置登录会话目录权限失败：{e}"))?;
+    crate::fs_ext::set_file_permissions(&requests_dir(session_dir), 0o700)
+        .map_err(|e| format!("设置登录请求目录权限失败：{e}"))?;
+    crate::fs_ext::set_file_permissions(&responses_dir(session_dir), 0o700)
+        .map_err(|e| format!("设置登录响应目录权限失败：{e}"))?;
     Ok(())
 }
 
@@ -432,7 +440,11 @@ fn write_json(path: PathBuf, value: &impl Serialize) -> Result<(), String> {
         std::thread::current().id()
     ));
     fs::write(&tmp, json).map_err(|e| format!("写入登录验证数据失败：{e}"))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("保存登录验证数据失败：{e}"))
+    crate::fs_ext::set_file_permissions(&tmp, 0o600)
+        .map_err(|e| format!("设置登录验证数据权限失败：{e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("保存登录验证数据失败：{e}"))?;
+    crate::fs_ext::set_file_permissions(&path, 0o600)
+        .map_err(|e| format!("确认登录验证数据权限失败：{e}"))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, String> {

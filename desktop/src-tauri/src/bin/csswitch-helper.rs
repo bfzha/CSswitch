@@ -12,20 +12,20 @@
 //!   cargo build --bin csswitch-helper --no-default-features --release
 
 // 通过 #[path] 引入共享模块（helper 不依赖 Tauri，无法用 crate:: 引用整个 lib）。
+#[path = "../cli/mod.rs"]
+mod cli;
 #[path = "../config.rs"]
 mod config;
 #[path = "../config_legacy.rs"]
 mod config_legacy;
-#[path = "../templates.rs"]
-mod templates;
-#[path = "../proc.rs"]
-mod proc;
 #[path = "../fs_ext.rs"]
 mod fs_ext;
 #[path = "../oauth_forge.rs"]
 mod oauth_forge;
-#[path = "../cli/mod.rs"]
-mod cli;
+#[path = "../proc.rs"]
+mod proc;
+#[path = "../templates.rs"]
+mod templates;
 
 fn main() {
     // 初始化操作日志（Plan V2 §3.7）。
@@ -55,10 +55,7 @@ fn main() {
             // 人类可读输出（无 --json 标志时的默认行为）
             if response.ok {
                 if let Some(data) = &response.data {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(data).unwrap_or_default()
-                    );
+                    println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
                 } else {
                     println!("OK");
                 }

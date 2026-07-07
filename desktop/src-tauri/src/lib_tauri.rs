@@ -312,6 +312,7 @@ enum ProxyAction {
 fn ensure_proxy(
     app: &tauri::AppHandle,
     state: &State<'_, Mutex<AppState>>,
+    lifecycle: &lifecycle::Lifecycle,
 ) -> Result<(u16, String, ProxyAction), String> {
     let dir = config::default_dir();
     let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
@@ -338,6 +339,8 @@ fn ensure_proxy(
         config::update(&dir, move |c| c.secret = s2).map_err(|e| e.to_string())?;
         s
     };
+
+    let generation = lifecycle.current_generation();
 
     // 整个「检查 → 清残留 → 起进程 → 记账」在同一把锁内完成，避免并发双击时
     // 两路都判定「没健康代理」各起一个、后者覆盖前者的 Child 句柄导致前者被孤儿泄漏。
@@ -426,6 +429,15 @@ fn ensure_proxy(
         return Err(format!(
             "代理起后探活超时（端口 {port} 可能被占用，或 key 无效）。\n{tail}"
         ));
+    }
+    if lifecycle.current_generation() != generation {
+        let mut st = lock(state);
+        if st.secret == secret {
+            kill_child(&mut st.proxy);
+            st.provider.clear();
+            st.key_fp = 0;
+        }
+        return Err("代理启动已被更新的停止/切换操作取代，请重试。".to_string());
     }
     Ok((port, secret, ProxyAction::Restarted))
 }
@@ -563,19 +575,21 @@ fn list_templates() -> Vec<serde_json::Value> {
 fn set_mode(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     mode: String,
 ) -> Result<(), String> {
     if mode != "proxy" && mode != "official" {
         return Err(format!("未知模式：{mode}（只支持 proxy / official）。"));
     }
-    let dir = config::default_dir();
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
 
-    // 事务化（修 P2 GPT 复审）：切官方要「先拆第三方链路，成功了再落盘 official」。
-    // 旧序（先落盘再拆）若拆沙箱失败，会留下「磁盘=official、UI/进程=第三方」的状态分裂
-    // （前端收到 Err 保持第三方 UI，磁盘却已是 official，下次启动就错进官方模式）。
-    // 现序保证：拆失败 → 不落盘、保持 proxy 模式、如实报错，磁盘/UI/进程一致。
-    if mode == "official" {
-        {
+        // 事务化（修 P2 GPT 复审）：切官方要「先拆第三方链路，成功了再落盘 official」。
+        // 旧序（先落盘再拆）若拆沙箱失败，会留下「磁盘=official、UI/进程=第三方」的状态分裂
+        // （前端收到 Err 保持第三方 UI，磁盘却已是 official，下次启动就错进官方模式）。
+        // 现序保证：拆失败 → 不落盘、保持 proxy 模式、如实报错，磁盘/UI/进程一致。
+        if mode == "official" {
+            lifecycle.bump_generation();
             let mut st = lock(&state);
             // 先停沙箱：失败就在动代理/落盘之前中止，状态不分裂。
             stop_sandbox_inner(&app, &mut st).map_err(|e| {
@@ -583,15 +597,17 @@ fn set_mode(
             })?;
             kill_child(&mut st.proxy);
             st.secret.clear();
+            st.provider.clear();
+            st.key_fp = 0;
         }
-    }
-    // 拆链已成功（或切回 proxy 无需拆）→ 落盘。
-    config::update(&dir, {
-        let mode = mode.clone();
-        move |c| c.mode = mode
+        // 拆链已成功（或切回 proxy 无需拆）→ 落盘。
+        config::update(&dir, {
+            let mode = mode.clone();
+            move |c| c.mode = mode
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(())
     })
-    .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// 官方模式：干净地打开用户【真实】的 Claude Science（用户自己的官方登录与订阅）。
@@ -635,8 +651,32 @@ struct UiSettings {
     sandbox_port: u16,
 }
 
+fn settings_change_needs_teardown(
+    old_proxy: u16,
+    new_proxy: u16,
+    old_sandbox: u16,
+    new_sandbox: u16,
+) -> bool {
+    old_proxy != new_proxy || old_sandbox != new_sandbox
+}
+
 #[tauri::command]
-fn set_config(cfg: UiSettings) -> Result<(), String> {
+fn set_config(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    cfg: UiSettings,
+) -> Result<(), String> {
+    set_settings(app, state, lifecycle, cfg)
+}
+
+#[tauri::command]
+fn set_settings(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    cfg: UiSettings,
+) -> Result<(), String> {
     if cfg.proxy_port == 8765 || cfg.sandbox_port == 8765 {
         return Err("端口 8765 是真实 Science 实例保留端口，不能用。".into());
     }
@@ -646,34 +686,62 @@ fn set_config(cfg: UiSettings) -> Result<(), String> {
     if cfg.proxy_port == cfg.sandbox_port {
         return Err("代理端口与沙箱端口不能相同。".into());
     }
-    let dir = config::default_dir();
-    config::update(&dir, move |c| {
-        c.proxy_port = cfg.proxy_port;
-        c.sandbox_port = cfg.sandbox_port;
-    })
-    .map(|_| ())
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn set_settings(cfg: UiSettings) -> Result<(), String> {
-    set_config(cfg)
-}
-
-#[tauri::command]
-fn save_provider_key(provider: String, key: String) -> Result<String, String> {
-    let dir = config::default_dir();
-    let key2 = key.clone();
-    config::update(&dir, move |c| {
-        // 兼容旧接口：按 adapter/template_id 找到 active profile 并保存 key
-        if let Some(p) = c.active_profile_mut() {
-            if templates::adapter_for(&p.template_id) == provider || p.template_id == provider {
-                p.api_key = key2;
-            }
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let old = config::load_from(&dir).map_err(|e| e.to_string())?;
+        let teardown = settings_change_needs_teardown(
+            old.proxy_port,
+            cfg.proxy_port,
+            old.sandbox_port,
+            cfg.sandbox_port,
+        );
+        if teardown {
+            let mut st = lock(&state);
+            stop_sandbox_inner(&app, &mut st).map_err(|e| {
+                format!(
+                    "端口未更改：无法停止指向旧端口的沙箱（{e}），为避免留下失效链路，端口保持不变。（真实实例 8765 未受影响）"
+                )
+            })?;
+            lifecycle.bump_generation();
+            kill_child(&mut st.proxy);
+            st.secret.clear();
+            st.provider.clear();
+            st.key_fp = 0;
+            st.sandbox_port = 0;
+            st.sandbox_url = None;
         }
+        config::update(&dir, move |c| {
+            c.proxy_port = cfg.proxy_port;
+            c.sandbox_port = cfg.sandbox_port;
+        })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     })
-    .map_err(|e| e.to_string())?;
-    Ok(config::mask(&key))
+}
+
+#[tauri::command]
+fn save_provider_key(
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    provider: String,
+    key: String,
+) -> Result<String, String> {
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let key2 = key.clone();
+        config::update(&dir, move |c| {
+            // 兼容旧接口：按 adapter/template_id 找到 active profile 并保存 key
+            if let Some(p) = c.active_profile_mut() {
+                if templates::adapter_for(&p.template_id) == provider || p.template_id == provider {
+                    p.api_key = key2;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        lifecycle.bump_generation();
+        stop_proxy_state(&state);
+        Ok(config::mask(&key))
+    })
 }
 
 fn template_default_model(tpl: &templates::Template) -> String {
@@ -840,110 +908,238 @@ fn stop_proxy_state(state: &State<'_, Mutex<AppState>>) {
     st.key_fp = 0;
 }
 
+fn apply_connection_edit(
+    profile: &mut config::Profile,
+    base_url: Option<&str>,
+    api_format: Option<&str>,
+    model: Option<&str>,
+    key: Option<&str>,
+) {
+    if let Some(v) = base_url {
+        profile.base_url = v.trim().to_string();
+    }
+    if let Some(v) = api_format {
+        profile.api_format = v.trim().to_string();
+    }
+    if let Some(v) = model {
+        profile.model = v.trim().to_string();
+    }
+    if let Some(v) = key {
+        if !v.trim().is_empty() {
+            profile.api_key = v.trim().to_string();
+        }
+    }
+}
+
+fn validate_profile_with_scratch(
+    app: &tauri::AppHandle,
+    profile: &config::Profile,
+    can_skip: bool,
+) -> Result<bool, String> {
+    let launch = proxy_launch_for(profile);
+    let root = asset_root(app).ok_or("找不到代理脚本 proxy/csswitch_proxy.py。")?;
+    let py = proc::find_exe("python3").ok_or("缺少依赖 python3（起临时代理需要）。")?;
+    let script = root.join("proxy/csswitch_proxy.py");
+    let res = scratch::scratch_probe(
+        &py,
+        &script,
+        &scratch::ScratchTarget {
+            provider: &launch.adapter,
+            key_env: launch.key_env,
+            base_url: &launch.base_url,
+            key: &launch.key,
+            model: Some(&launch.model),
+            relay_thinking: launch.thinking_policy,
+        },
+        scratch::ProbeKind::Message,
+    );
+    match scratch::classify(res.status) {
+        scratch::ProbeOutcome::Ok => Ok(true),
+        scratch::ProbeOutcome::Auth(code) => Err(format!(
+            "上游拒绝（{code}），key/权限有误，配置未保存。"
+        )),
+        scratch::ProbeOutcome::ModelError(code) => Err(format!(
+            "上游拒绝该模型（{code}），请换一个模型或核对 base_url，配置未保存。"
+        )),
+        scratch::ProbeOutcome::Ambiguous(code) => {
+            let hint = code
+                .map(|c| format!("上游返回 {c}"))
+                .unwrap_or_else(|| "上游响应不明确".to_string());
+            if can_skip {
+                Err(format!("{hint}，未切换；确认无误后可选择跳过校验。"))
+            } else {
+                Err(format!("{hint}，连接未保存，请稍后重试。"))
+            }
+        }
+        scratch::ProbeOutcome::Unsupported(code) => {
+            if can_skip {
+                Err(format!("上游不支持当前探测端点（{code}），未切换；确认无误后可选择跳过校验。"))
+            } else {
+                Err(format!("上游不支持当前探测端点（{code}），连接未保存。"))
+            }
+        }
+        scratch::ProbeOutcome::NoResponse => {
+            if can_skip {
+                Err("临时校验无响应，未切换；确认网络和配置无误后可选择跳过校验。".to_string())
+            } else {
+                Err("临时校验无响应，连接未保存。".to_string())
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn create_profile(
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     template_id: String,
     name: String,
     key: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
 ) -> Result<String, String> {
-    create_profile_inner(
-        &config::default_dir(),
-        &template_id,
-        &name,
-        key.as_deref(),
-        base_url.as_deref(),
-        model.as_deref(),
-    )
+    lifecycle.with_serialized(|| {
+        create_profile_inner(
+            &config::default_dir(),
+            &template_id,
+            &name,
+            key.as_deref(),
+            base_url.as_deref(),
+            model.as_deref(),
+        )
+    })
 }
 
 #[tauri::command]
-fn update_profile_metadata(id: String, name: String, notes: Option<String>) -> Result<(), String> {
-    update_profile_metadata_inner(&config::default_dir(), &id, &name, notes.as_deref())
+fn update_profile_metadata(
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    id: String,
+    name: String,
+    notes: Option<String>,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        update_profile_metadata_inner(&config::default_dir(), &id, &name, notes.as_deref())
+    })
 }
 
 #[tauri::command]
 fn update_profile_connection(
+    app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     id: String,
     base_url: Option<String>,
     api_format: Option<String>,
     model: Option<String>,
     key: Option<String>,
 ) -> Result<(), String> {
-    let dir = config::default_dir();
-    let was_active = config::load_from(&dir)
-        .map(|c| c.active_id == id)
-        .unwrap_or(false);
-    update_profile_connection_inner(
-        &dir,
-        &id,
-        base_url.as_deref(),
-        api_format.as_deref(),
-        model.as_deref(),
-        key.as_deref(),
-    )?;
-    if was_active {
-        stop_proxy_state(&state);
-    }
-    Ok(())
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
+        let mut candidate = cfg
+            .profile_by_id(&id)
+            .cloned()
+            .ok_or_else(|| format!("找不到 profile：{id}"))?;
+        apply_connection_edit(
+            &mut candidate,
+            base_url.as_deref(),
+            api_format.as_deref(),
+            model.as_deref(),
+            key.as_deref(),
+        );
+        assert_profile_runnable(&candidate)?;
+        validate_profile_with_scratch(&app, &candidate, false)?;
+        let was_active = cfg.active_id == id;
+        update_profile_connection_inner(
+            &dir,
+            &id,
+            base_url.as_deref(),
+            api_format.as_deref(),
+            model.as_deref(),
+            key.as_deref(),
+        )?;
+        if was_active {
+            lifecycle.bump_generation();
+            stop_proxy_state(&state);
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
-fn clear_profile_key(state: State<'_, Mutex<AppState>>, id: String) -> Result<(), String> {
-    let dir = config::default_dir();
-    let was_active = config::load_from(&dir)
-        .map(|c| c.active_id == id)
-        .unwrap_or(false);
-    clear_profile_key_inner(&dir, &id)?;
-    if was_active {
-        stop_proxy_state(&state);
-    }
-    Ok(())
+fn clear_profile_key(
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    id: String,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let was_active = config::load_from(&dir)
+            .map(|c| c.active_id == id)
+            .unwrap_or(false);
+        clear_profile_key_inner(&dir, &id)?;
+        if was_active {
+            lifecycle.bump_generation();
+            stop_proxy_state(&state);
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
-fn delete_profile(state: State<'_, Mutex<AppState>>, id: String) -> Result<(), String> {
-    let dir = config::default_dir();
-    let was_active = config::load_from(&dir)
-        .map(|c| c.active_id == id)
-        .unwrap_or(false);
-    delete_profile_inner(&dir, &id)?;
-    if was_active {
-        stop_proxy_state(&state);
-    }
-    Ok(())
+fn delete_profile(
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+    id: String,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let was_active = config::load_from(&dir)
+            .map(|c| c.active_id == id)
+            .unwrap_or(false);
+        delete_profile_inner(&dir, &id)?;
+        if was_active {
+            lifecycle.bump_generation();
+            stop_proxy_state(&state);
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn set_active_profile(
+    app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
     id: String,
     skip_verify: bool,
 ) -> Result<serde_json::Value, String> {
-    let dir = config::default_dir();
-    let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
-    let profile = cfg
-        .profile_by_id(&id)
-        .cloned()
-        .ok_or_else(|| format!("找不到 profile：{id}"))?;
-    if !skip_verify {
-        if let Err(e) = assert_profile_runnable(&profile) {
-            return Ok(json!({
-                "committed": false,
-                "active_id": cfg.active_id,
-                "hint": e,
-            }));
+    lifecycle.with_serialized(|| {
+        let dir = config::default_dir();
+        let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
+        let profile = cfg
+            .profile_by_id(&id)
+            .cloned()
+            .ok_or_else(|| format!("找不到 profile：{id}"))?;
+        if !skip_verify {
+            if let Err(e) = assert_profile_runnable(&profile)
+                .and_then(|_| validate_profile_with_scratch(&app, &profile, true).map(|_| ()))
+            {
+                return Ok(json!({
+                    "committed": false,
+                    "active_id": cfg.active_id,
+                    "hint": e,
+                }));
+            }
         }
-    }
-    config::update(&dir, |c| c.active_id = id.clone()).map_err(|e| e.to_string())?;
-    stop_proxy_state(&state);
-    Ok(json!({
-        "committed": true,
-        "active_id": id,
-        "hint": if skip_verify { "已跳过校验并设为当前。" } else { "已设为当前。" },
-    }))
+        config::update(&dir, |c| c.active_id = id.clone()).map_err(|e| e.to_string())?;
+        lifecycle.bump_generation();
+        stop_proxy_state(&state);
+        Ok(json!({
+            "committed": true,
+            "active_id": id,
+            "hint": if skip_verify { "已跳过校验并设为当前。" } else { "已设为当前。" },
+        }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -1100,9 +1296,12 @@ fn fetch_models(app: tauri::AppHandle, req: FetchModelsReq) -> Result<serde_json
 fn start_proxy(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
 ) -> Result<serde_json::Value, String> {
-    let (port, _secret, _action) = ensure_proxy(&app, &state)?;
-    Ok(json!({ "port": port }))
+    lifecycle.with_serialized(|| {
+        let (port, _secret, _action) = ensure_proxy(&app, &state, &lifecycle)?;
+        Ok(json!({ "port": port }))
+    })
 }
 
 /// 「存 key 即验证」：确保代理在跑，再经代理向上游发一个**最小**请求
@@ -1113,8 +1312,10 @@ fn start_proxy(
 fn verify_key(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
 ) -> Result<serde_json::Value, String> {
-    let (port, secret, _action) = ensure_proxy(&app, &state)?;
+    let (port, secret, _action) =
+        lifecycle.with_serialized(|| ensure_proxy(&app, &state, &lifecycle))?;
     // 走稳定模型 id（代理内部映射到当前 provider 的真实模型），非流式、只要 1 个 token。
     let body = br#"{"model":"claude-opus-4-8","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}"#;
     match proc::http_post_status(port, Some(&secret), "/v1/messages", body, 15000) {
@@ -1131,13 +1332,22 @@ fn verify_key(
 }
 
 #[tauri::command]
-fn stop_all(app: tauri::AppHandle, state: State<'_, Mutex<AppState>>) -> Result<(), String> {
-    let mut st = lock(&state);
-    // 先停沙箱并记录结果；代理无论如何都杀。沙箱没停干净则如实返错，不虚报成功。
-    let sandbox_res = stop_sandbox_inner(&app, &mut st);
-    kill_child(&mut st.proxy);
-    st.secret.clear();
-    sandbox_res.map_err(|e| format!("代理已停；但{e}真实实例 8765 未受影响。"))
+fn stop_all(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
+) -> Result<(), String> {
+    lifecycle.with_serialized(|| {
+        lifecycle.bump_generation();
+        let mut st = lock(&state);
+        // 先停沙箱并记录结果；代理无论如何都杀。沙箱没停干净则如实返错，不虚报成功。
+        let sandbox_res = stop_sandbox_inner(&app, &mut st);
+        kill_child(&mut st.proxy);
+        st.secret.clear();
+        st.provider.clear();
+        st.key_fp = 0;
+        sandbox_res.map_err(|e| format!("代理已停；但{e}真实实例 8765 未受影响。"))
+    })
 }
 
 /// 「一键开始」：起代理 → 写虚拟 OAuth → 起沙箱 Science → 探活 → 开浏览器。
@@ -1146,16 +1356,18 @@ fn stop_all(app: tauri::AppHandle, state: State<'_, Mutex<AppState>>) -> Result<
 fn one_click_login(
     app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
+    lifecycle: State<'_, lifecycle::Lifecycle>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (&app, &state);
+        let _ = (&app, &state, &lifecycle);
         return Err("本地模式「一键开始」仅支持 macOS。请切换到「远程服务器」模式管理 Linux 服务器上的 Science。".into());
     }
     #[cfg(target_os = "macos")]
     {
+    lifecycle.with_serialized(|| {
     // 1~3. 确保代理在跑且健康（内部已查 key、探活）。带回本次是复用还是重启。
-    let (pport, secret, proxy_action) = ensure_proxy(&app, &state)?;
+    let (pport, secret, proxy_action) = ensure_proxy(&app, &state, &lifecycle)?;
 
     let dir = config::default_dir();
     let cfg = config::load_from(&dir).map_err(|e| e.to_string())?;
@@ -1303,6 +1515,7 @@ fn one_click_login(
         Err(_) => format!("{started}，服务已就绪，请手动打开：{url}"),
     };
     Ok(json!({ "url": url, "msg": msg, "action": "started" }))
+    })
     } // #[cfg(target_os = "macos")]
 }
 
@@ -1580,6 +1793,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(AppState::default()))
+        .manage(lifecycle::Lifecycle::new())
         .invoke_handler(tauri::generate_handler![
             // 本地命令（macOS 本地模式）
             get_config,
@@ -1665,7 +1879,10 @@ mod tests {
     // first_http_url 和 sandbox_home 仅 macOS 编译，测试也仅在 macOS 运行。
     #[cfg(target_os = "macos")]
     use super::{first_http_url, sandbox_home};
-    use super::{assert_profile_runnable, key_env_for_adapter, key_fingerprint, redact};
+    use super::{
+        assert_profile_runnable, key_env_for_adapter, key_fingerprint, redact,
+        settings_change_needs_teardown,
+    };
     use crate::config::Profile;
 
     /// 测试 URL 解析（仅 macOS，依赖 first_http_url）。
@@ -1738,6 +1955,14 @@ mod tests {
             ..Default::default()
         };
         assert!(assert_profile_runnable(&profile).is_ok());
+    }
+
+    #[test]
+    fn settings_change_tears_down_only_when_ports_change() {
+        assert!(!settings_change_needs_teardown(18991, 18991, 8990, 8990));
+        assert!(settings_change_needs_teardown(18991, 19000, 8990, 8990));
+        assert!(settings_change_needs_teardown(18991, 18991, 8990, 9000));
+        assert!(settings_change_needs_teardown(18991, 19000, 8990, 9000));
     }
 
     /// 测试 sandbox_home 路径（仅 macOS，依赖 sandbox_home 函数）。

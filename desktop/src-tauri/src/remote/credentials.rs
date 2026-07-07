@@ -164,8 +164,8 @@ impl LocalEncryptedCredentialStore {
         let path = self.secrets_path();
         crate::config::assert_not_symlink(&path)
             .map_err(|e| format!("本机密码文件安全拒绝：{e}"))?;
-        let json = serde_json::to_vec_pretty(file)
-            .map_err(|e| format!("序列化本机密码文件失败：{e}"))?;
+        let json =
+            serde_json::to_vec_pretty(file).map_err(|e| format!("序列化本机密码文件失败：{e}"))?;
         let tmp = path.with_extension(format!(
             "json.tmp.{}.{:?}",
             std::process::id(),
@@ -185,8 +185,8 @@ impl LocalEncryptedCredentialStore {
         crate::config::assert_not_symlink(&path)
             .map_err(|e| format!("本机密码密钥文件安全拒绝：{e}"))?;
         if path.exists() {
-            let raw = fs::read_to_string(&path)
-                .map_err(|e| format!("读取本机密码密钥文件失败：{e}"))?;
+            let raw =
+                fs::read_to_string(&path).map_err(|e| format!("读取本机密码密钥文件失败：{e}"))?;
             if let Some(value) = parse_local_key(&raw) {
                 return Ok(value);
             }
@@ -290,7 +290,11 @@ fn derive_local_key(root_key_b64: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn encrypt_local_secret(label: &str, plaintext: &[u8], root_key_b64: &str) -> Result<String, String> {
+fn encrypt_local_secret(
+    label: &str,
+    plaintext: &[u8],
+    root_key_b64: &str,
+) -> Result<String, String> {
     let key = derive_local_key(root_key_b64)?;
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
@@ -401,9 +405,9 @@ fn delete_secret_with_fallback(
     let fallback_result = fallback.delete(&label);
     match (system_result, fallback_result) {
         (Ok(()), _) | (_, Ok(())) => Ok(()),
-        (Err(system_error), Err(fallback_error)) => {
-            Err(format!("系统安全存储删除失败：{system_error}；本机加密存储删除失败：{fallback_error}"))
-        }
+        (Err(system_error), Err(fallback_error)) => Err(format!(
+            "系统安全存储删除失败：{system_error}；本机加密存储删除失败：{fallback_error}"
+        )),
     }
 }
 

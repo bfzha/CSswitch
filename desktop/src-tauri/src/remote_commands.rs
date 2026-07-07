@@ -387,7 +387,7 @@ pub fn remote_get_config(profile: RemoteHostProfile) -> Result<Value, String> {
 /// 写入远程配置。
 #[tauri::command]
 pub fn remote_set_config(profile: RemoteHostProfile, config_json: String) -> Result<(), String> {
-    remote::transport::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_stdin_with_retry::<Value>(
         &profile,
         &["config".to_string(), "set".to_string(), config_json],
     )
@@ -403,7 +403,7 @@ pub fn remote_save_provider_key(
     provider: String,
     key: String,
 ) -> Result<String, String> {
-    let result: Value = remote::transport::run_helper_json_with_retry::<Value>(
+    let result: Value = remote::transport::run_helper_json_stdin_with_retry::<Value>(
         &profile,
         &["config".to_string(), "save-key".to_string(), provider, key],
     )
@@ -479,17 +479,13 @@ pub fn remote_start_proxy(
     let (remote_cfg, adapter) = remote_active_config_for_start(&provider, port, None, &secret)?;
     let config_json = serde_json::to_string(&remote_cfg).map_err(|e| e.to_string())?;
 
-    remote::transport::run_helper_json_with_retry::<Value>(
+    stop_remote_proxy(&profile).map_err(|e| format!("停止旧远程代理失败：{}", e.message))?;
+
+    remote::transport::run_helper_json_stdin_with_retry::<Value>(
         &profile,
         &["config".to_string(), "set".to_string(), config_json],
     )
     .map_err(|e| format!("同步当前 Profile 到服务器失败：{}", e.message))?;
-
-    remote::transport::run_helper_json_with_retry::<Value>(
-        &profile,
-        &["proxy".to_string(), "stop".to_string()],
-    )
-    .map_err(|e| format!("停止旧远程代理失败：{}", e.message))?;
 
     remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
@@ -505,28 +501,42 @@ pub fn remote_start_proxy(
 }
 
 /// 停止远程代理。
-#[tauri::command]
-pub fn remote_stop_proxy(profile: RemoteHostProfile) -> Result<(), String> {
+fn stop_remote_proxy(profile: &RemoteHostProfile) -> Result<Value, remote::RemoteError> {
     remote::transport::run_helper_json_with_retry::<Value>(
-        &profile,
+        profile,
         &["proxy".to_string(), "stop".to_string()],
     )
-    .map(|_| ())
-    .map_err(|e| e.message)
+}
+
+#[tauri::command]
+pub fn remote_stop_proxy(profile: RemoteHostProfile) -> Result<(), String> {
+    stop_remote_proxy(&profile)
+        .map(|_| ())
+        .map_err(|e| e.message)
+}
+
+fn stop_remote_sandbox(profile: &RemoteHostProfile) -> Result<Value, remote::RemoteError> {
+    remote::transport::run_helper_json_with_retry::<Value>(
+        profile,
+        &["sandbox".to_string(), "stop".to_string()],
+    )
 }
 
 /// 停止远程沙箱与代理。
 #[tauri::command]
 pub fn remote_stop_all(profile: RemoteHostProfile) -> Result<Value, String> {
-    let sandbox_res = remote::transport::run_helper_json_with_retry::<Value>(
-        &profile,
-        &["sandbox".to_string(), "stop".to_string()],
-    );
-
-    let proxy_res = remote::transport::run_helper_json_with_retry::<Value>(
-        &profile,
-        &["proxy".to_string(), "stop".to_string()],
-    );
+    let sandbox_profile = profile.clone();
+    let sandbox_thread = std::thread::spawn(move || stop_remote_sandbox(&sandbox_profile));
+    let proxy_res = stop_remote_proxy(&profile);
+    let sandbox_res = sandbox_thread.join().unwrap_or_else(|_| {
+        Err(remote::RemoteError {
+            code: "sandbox_stop_thread_panic".to_string(),
+            message: "停止远程沙箱线程异常退出".to_string(),
+            details: None,
+            recoverable: false,
+            suggestion: None,
+        })
+    });
 
     match (sandbox_res, proxy_res) {
         (Ok(sandbox), Ok(proxy)) => Ok(json!({
@@ -586,7 +596,12 @@ pub fn remote_status(profile: RemoteHostProfile) -> Result<Value, String> {
             .map_err(|e| e.message)?;
 
     let proxy_running = status["proxy_running"].as_bool().unwrap_or(false);
-    let upstream_reachable = status["platform"].as_str().is_some();
+    let upstream_reachable = if proxy_running {
+        status["upstream_reachable"].as_bool().unwrap_or(false)
+            || status["proxy_healthy"].as_bool().unwrap_or(false)
+    } else {
+        false
+    };
 
     Ok(json!({
         "proxy": if proxy_running { "green" } else { "amber" },
@@ -659,23 +674,15 @@ pub fn remote_one_click(
         remote_active_config_for_start(&provider, proxy_port, Some(sandbox_port), &secret)?;
     let config_json = serde_json::to_string(&remote_cfg).map_err(|e| e.to_string())?;
 
-    remote::transport::run_helper_json_with_retry::<Value>(
+    stop_remote_sandbox(&profile).map_err(|e| format!("停止旧远程沙箱失败：{}", e.message))?;
+
+    stop_remote_proxy(&profile).map_err(|e| format!("停止旧远程代理失败：{}", e.message))?;
+
+    remote::transport::run_helper_json_stdin_with_retry::<Value>(
         &profile,
         &["config".to_string(), "set".to_string(), config_json],
     )
     .map_err(|e| format!("同步当前 Profile 到服务器失败：{}", e.message))?;
-
-    remote::transport::run_helper_json_with_retry::<Value>(
-        &profile,
-        &["proxy".to_string(), "stop".to_string()],
-    )
-    .map_err(|e| format!("停止旧远程代理失败：{}", e.message))?;
-
-    remote::transport::run_helper_json_with_retry::<Value>(
-        &profile,
-        &["sandbox".to_string(), "stop".to_string()],
-    )
-    .map_err(|e| format!("停止旧远程沙箱失败：{}", e.message))?;
 
     let proxy_result = remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
@@ -690,7 +697,7 @@ pub fn remote_one_click(
     .map_err(|e| format!("启动远程代理失败：{}", e.message))?;
 
     let proxy_url = format!("http://127.0.0.1:{proxy_port}/{secret}");
-    let sandbox_result = remote::transport::run_helper_json_with_retry::<Value>(
+    let sandbox_result = match remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &[
             "sandbox".to_string(),
@@ -698,8 +705,13 @@ pub fn remote_one_click(
             sandbox_port.to_string(),
             proxy_url.clone(),
         ],
-    )
-    .map_err(|e| format!("启动远程沙箱失败：{}", e.message))?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = stop_remote_proxy(&profile);
+            return Err(format!("启动远程沙箱失败：{}", err.message));
+        }
+    };
 
     let local_url = sandbox_result["url"]
         .as_str()

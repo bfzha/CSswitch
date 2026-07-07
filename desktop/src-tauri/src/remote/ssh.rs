@@ -47,9 +47,6 @@ pub(crate) const SLOW_CMD_TIMEOUT_SECS: u64 = 120;
 pub(crate) const DEFAULT_RETRIES: u32 = 3;
 /// Helper 发布的 GitHub 仓库（可通过环境变量覆盖）。
 pub(crate) const HELPER_RELEASE_REPO_ENV: &str = "CSSWITCH_HELPER_RELEASE_REPO";
-// Current fork publishes helper release assets here.
-// If this change is merged upstream, switch this default back to SuperJJ007/CSswitch.
-pub(crate) const HELPER_RELEASE_REPO: &str = "bfzha/CSswitch";
 
 /// 校验 GitHub owner/repo 格式，防止命令注入。
 /// 只允许字母、数字、连字符、下划线、点。
@@ -72,6 +69,67 @@ pub(crate) fn validate_repo_format(repo: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn parse_github_repo(remote: &str) -> Option<String> {
+    let mut value = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(rest) = value.strip_prefix("git@github.com:") {
+        value = rest;
+    } else if let Some(rest) = value.strip_prefix("ssh://git@github.com/") {
+        value = rest;
+    } else if let Some(rest) = value.strip_prefix("https://github.com/") {
+        value = rest;
+    } else if let Some(rest) = value.strip_prefix("http://github.com/") {
+        value = rest;
+    }
+    validate_repo_format(value).map(str::to_string)
+}
+
+pub(crate) fn resolve_helper_release_repo_from(
+    env_repo: Option<&str>,
+    build_repo: Option<&str>,
+    git_remote: Option<&str>,
+) -> Result<String, RemoteError> {
+    for candidate in [env_repo, build_repo] {
+        if let Some(repo) = candidate.and_then(validate_repo_format) {
+            return Ok(repo.to_string());
+        }
+    }
+    if let Some(repo) = git_remote.and_then(parse_github_repo) {
+        return Ok(repo);
+    }
+    Err(RemoteError {
+        code: "helper_release_repo_unknown".to_string(),
+        message: "无法确定 Helper Release 仓库".to_string(),
+        details: None,
+        recoverable: true,
+        suggestion: Some(format!(
+            "请设置 {HELPER_RELEASE_REPO_ENV}=owner/repo，或在 CI 构建时注入 GITHUB_REPOSITORY。"
+        )),
+    })
+}
+
+fn git_origin_remote() -> Option<String> {
+    let output = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub(crate) fn resolve_helper_release_repo() -> Result<String, RemoteError> {
+    resolve_helper_release_repo_from(
+        std::env::var(HELPER_RELEASE_REPO_ENV).ok().as_deref(),
+        option_env!("GITHUB_REPOSITORY"),
+        git_origin_remote().as_deref(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +183,10 @@ pub fn build_ssh_args(profile: &RemoteHostProfile, helper_args: &[String]) -> Ve
     .args
 }
 
+pub fn build_ssh_stdin_args(profile: &RemoteHostProfile) -> Vec<String> {
+    build_ssh_stdin_command_spec(profile, AuthRuntimeOptions::default_for(profile)).args
+}
+
 fn build_ssh_command_spec(
     profile: &RemoteHostProfile,
     helper_args: &[String],
@@ -149,25 +211,38 @@ fn build_ssh_command_spec(
     }
 }
 
-/// 构建安装 helper 的 SSH 命令。
-/// 在远程执行 shell 脚本：下载 release 资产 → 校验 → 安装。
-///
-/// P0-2 修复：对平台信息进行白名单校验，防止命令注入。
-pub fn build_helper_install_args(profile: &RemoteHostProfile) -> Vec<String> {
-    build_helper_install_command_spec(profile, AuthRuntimeOptions::default_for(profile)).args
-}
-
-pub fn build_helper_install_command_spec(
+fn build_ssh_stdin_command_spec(
     profile: &RemoteHostProfile,
     runtime: AuthRuntimeOptions,
 ) -> SshCommandSpec {
     let auth_plan = SshAuthPlan::from_profile(profile, runtime);
     let mut args = build_ssh_base_args_with_plan(profile, &auth_plan);
+    args.push(format!(
+        "{} --json serve",
+        shell_quote(&profile.helper_path)
+    ));
+    SshCommandSpec {
+        args,
+        env: auth_plan.env,
+    }
+}
+
+/// 构建安装 helper 的 SSH 命令。
+/// 在远程执行 shell 脚本：下载 release 资产 → 校验 → 安装。
+///
+/// P0-2 修复：对平台信息进行白名单校验，防止命令注入。
+pub fn build_helper_install_args(profile: &RemoteHostProfile) -> Result<Vec<String>, RemoteError> {
+    Ok(build_helper_install_command_spec(profile, AuthRuntimeOptions::default_for(profile))?.args)
+}
+
+pub fn build_helper_install_command_spec(
+    profile: &RemoteHostProfile,
+    runtime: AuthRuntimeOptions,
+) -> Result<SshCommandSpec, RemoteError> {
+    let auth_plan = SshAuthPlan::from_profile(profile, runtime);
+    let mut args = build_ssh_base_args_with_plan(profile, &auth_plan);
     let helper_path = shell_quote(&profile.helper_path);
-    let repo = std::env::var(HELPER_RELEASE_REPO_ENV)
-        .ok()
-        .and_then(|v| validate_repo_format(&v).map(String::from))
-        .unwrap_or_else(|| HELPER_RELEASE_REPO.to_string());
+    let repo = resolve_helper_release_repo()?;
 
     let helper_version = env!("CARGO_PKG_VERSION");
 
@@ -261,10 +336,10 @@ mv "$TMP" "$HELPER_PATH"
         helper_version = helper_version,
     );
     args.push(script);
-    SshCommandSpec {
+    Ok(SshCommandSpec {
         args,
         env: auth_plan.env,
-    }
+    })
 }
 
 // ============================================================================
@@ -509,6 +584,59 @@ pub fn run_helper_json_with_retry<T: DeserializeOwned>(
     )
 }
 
+pub fn run_helper_json_stdin_with_retry<T: DeserializeOwned>(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+) -> Result<T, RemoteError> {
+    run_helper_json_stdin(
+        profile,
+        helper_args,
+        DEFAULT_CMD_TIMEOUT_SECS,
+        DEFAULT_RETRIES,
+    )
+}
+
+fn run_helper_json_stdin<T: DeserializeOwned>(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+    timeout_secs: u64,
+    retries: u32,
+) -> Result<T, RemoteError> {
+    let mut last_error: Option<RemoteError> = None;
+
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            let delay = Duration::from_secs(2u64.saturating_mul(1 << (attempt - 1)));
+            std::thread::sleep(delay);
+        }
+
+        match try_run_ssh_stdin(profile, helper_args, timeout_secs) {
+            Ok(stdout) => match parse_helper_response::<T>(&stdout) {
+                Ok(data) => return Ok(data),
+                Err(e) => {
+                    last_error = Some(e);
+                    break;
+                }
+            },
+            Err(e) => {
+                let recoverable = is_recoverable_error(&e);
+                last_error = Some(e);
+                if !recoverable {
+                    break;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| RemoteError {
+        code: "unknown".to_string(),
+        message: "未知远程错误".to_string(),
+        details: None,
+        recoverable: false,
+        suggestion: Some("请查看日志或联系支持".to_string()),
+    }))
+}
+
 /// 用于慢速操作（如安装 helper、验证 key）。
 pub fn run_helper_json_slow<T: DeserializeOwned>(
     profile: &RemoteHostProfile,
@@ -519,7 +647,7 @@ pub fn run_helper_json_slow<T: DeserializeOwned>(
 
 pub fn run_helper_install(profile: &RemoteHostProfile) -> Result<String, RemoteError> {
     let (runtime, _broker) = auth_runtime_options(profile)?;
-    let spec = build_helper_install_command_spec(profile, runtime);
+    let spec = build_helper_install_command_spec(profile, runtime)?;
     run_ssh_command(
         profile,
         spec,
@@ -693,6 +821,33 @@ fn try_run_ssh(
     run_ssh_command(profile, spec, timeout_secs, helper_args.join(" "))
 }
 
+pub(crate) fn helper_stdin_payload(helper_args: &[String]) -> Result<Vec<u8>, RemoteError> {
+    let request = serde_json::json!({
+        "id": "request",
+        "command": helper_args,
+    });
+    let mut payload = serde_json::to_vec(&request).map_err(|e| RemoteError {
+        code: "helper_request_serialize_failed".to_string(),
+        message: format!("序列化 Helper 请求失败：{e}"),
+        details: None,
+        recoverable: false,
+        suggestion: None,
+    })?;
+    payload.push(b'\n');
+    Ok(payload)
+}
+
+fn try_run_ssh_stdin(
+    profile: &RemoteHostProfile,
+    helper_args: &[String],
+    timeout_secs: u64,
+) -> Result<String, RemoteError> {
+    let (runtime, _broker) = auth_runtime_options(profile)?;
+    let spec = build_ssh_stdin_command_spec(profile, runtime);
+    let payload = helper_stdin_payload(helper_args)?;
+    run_ssh_command_with_stdin(profile, spec, timeout_secs, "serve".to_string(), &payload)
+}
+
 fn run_ssh_command(
     profile: &RemoteHostProfile,
     spec: SshCommandSpec,
@@ -780,26 +935,104 @@ fn run_ssh_command(
     })
 }
 
+fn run_ssh_command_with_stdin(
+    profile: &RemoteHostProfile,
+    spec: SshCommandSpec,
+    timeout_secs: u64,
+    command_details: String,
+    stdin_bytes: &[u8],
+) -> Result<String, RemoteError> {
+    let mut command = hide_cmd(Command::new("ssh"));
+    command.args(&spec.args);
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| RemoteError {
+            code: "ssh_spawn_failed".to_string(),
+            message: format!("无法启动 SSH 客户端：{e}"),
+            details: Some(format!("请确认 OpenSSH 客户端已安装并在 PATH 中：{e}")),
+            recoverable: false,
+            suggestion: Some(
+                "Windows 10+ 自带 OpenSSH。请在「设置→应用→可选功能」中确认已安装。".to_string(),
+            ),
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(stdin_bytes).map_err(|e| RemoteError {
+            code: "ssh_stdin_failed".to_string(),
+            message: format!("写入 SSH 命令 stdin 失败：{e}"),
+            details: None,
+            recoverable: true,
+            suggestion: Some("请检查 SSH 连接是否稳定，并重试。".to_string()),
+        })?;
+    }
+
+    let output = match wait_with_timeout(child, Duration::from_secs(timeout_secs)) {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            return Err(RemoteError {
+                code: "ssh_timeout".to_string(),
+                message: format!("SSH 命令执行超时（{}秒）", timeout_secs),
+                details: Some(format!(
+                    "命令：{} {} {}",
+                    profile.host, profile.username, command_details
+                )),
+                recoverable: true,
+                suggestion: Some(
+                    "网络慢或远程命令卡住。请检查网络连接，或在 SSH 配置中设置超时参数。"
+                        .to_string(),
+                ),
+            });
+        }
+        Err(e) => {
+            return Err(RemoteError {
+                code: "ssh_io_error".to_string(),
+                message: format!("SSH 进程 I/O 错误：{e}"),
+                details: None,
+                recoverable: true,
+                suggestion: Some("请重试。如持续出现，请检查系统资源。".to_string()),
+            })
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(map_ssh_error(profile, &stderr, output.status.code()));
+    }
+
+    String::from_utf8(output.stdout).map_err(|_| RemoteError {
+        code: "invalid_utf8".to_string(),
+        message: "Helper 返回了无效的 UTF-8 数据".to_string(),
+        details: None,
+        recoverable: false,
+        suggestion: Some("这可能表示 Helper 二进制损坏。请尝试重新安装 Helper。".to_string()),
+    })
+}
+
+const CAPTURE_OUTPUT_LIMIT: usize = 1024 * 1024 + 1;
+
+fn read_limited(mut reader: impl Read) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = reader
+        .by_ref()
+        .take(CAPTURE_OUTPUT_LIMIT as u64)
+        .read_to_end(&mut buf);
+    buf
+}
+
 pub(crate) fn wait_with_timeout(
     mut child: std::process::Child,
     timeout: Duration,
 ) -> std::io::Result<Option<Output>> {
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut stdout) = stdout.take() {
-            let _ = stdout.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut stderr) = stderr.take() {
-            let _ = stderr.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || stdout.map(read_limited).unwrap_or_default());
+    let stderr_reader = std::thread::spawn(move || stderr.map(read_limited).unwrap_or_default());
 
     let started = std::time::Instant::now();
     let status = loop {
@@ -1125,6 +1358,47 @@ mod tests {
         let args = build_ssh_args(&sample_profile(), &["status".to_string()]);
         assert!(args.contains(&"-o".to_string()));
         assert!(args.contains(&"ConnectTimeout=10".to_string()));
+    }
+
+    #[test]
+    fn stdin_helper_args_do_not_put_payload_on_ssh_command_line() {
+        let args = build_ssh_stdin_args(&sample_profile());
+        let joined = args.join(" ");
+        assert!(joined.contains("--json serve"));
+        assert!(!joined.contains("sk-secret"));
+        assert!(!joined.contains("config set"));
+    }
+
+    #[test]
+    fn helper_release_repo_is_detected_without_static_default() {
+        assert_eq!(
+            resolve_helper_release_repo_from(
+                Some("bfzha/CSswitch-wsl_linux"),
+                Some("SuperJJ007/CSswitch"),
+                None,
+            )
+            .unwrap(),
+            "bfzha/CSswitch-wsl_linux"
+        );
+        assert_eq!(
+            resolve_helper_release_repo_from(
+                None,
+                Some("SuperJJ007/CSswitch"),
+                Some("git@github.com:ignored/repo.git"),
+            )
+            .unwrap(),
+            "SuperJJ007/CSswitch"
+        );
+        assert_eq!(
+            resolve_helper_release_repo_from(
+                None,
+                None,
+                Some("https://github.com/bfzha/CSswitch-wsl_linux.git"),
+            )
+            .unwrap(),
+            "bfzha/CSswitch-wsl_linux"
+        );
+        assert!(resolve_helper_release_repo_from(None, None, None).is_err());
     }
 
     #[test]

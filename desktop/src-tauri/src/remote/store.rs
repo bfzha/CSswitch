@@ -11,6 +11,10 @@ use std::time::Duration;
 
 use super::types::{RemoteAuthMethod, RemoteHostProfile, RemoteTargetKind};
 
+lazy_static::lazy_static! {
+    static ref PROFILE_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 /// 返回远程 Profile 文件的完整路径：`~/.csswitch/remote-hosts.json`。
 /// 跨平台：使用 `dirs::home_dir()` 获取用户主目录。
 pub fn profiles_path() -> PathBuf {
@@ -131,6 +135,9 @@ pub fn save_profiles(profiles: &[RemoteHostProfile]) -> Result<(), String> {
 /// 不存在则插入到列表头部（最近使用的排前面）。
 pub fn upsert_profile(profile: RemoteHostProfile) -> Result<RemoteHostProfile, String> {
     validate_profile(&profile)?;
+    let _guard = PROFILE_STORE_LOCK
+        .lock()
+        .map_err(|_| "远程配置锁异常".to_string())?;
     let mut profiles = load_profiles()?;
     if let Some(existing) = profiles.iter_mut().find(|p| p.id == profile.id) {
         *existing = profile.clone();
@@ -143,6 +150,9 @@ pub fn upsert_profile(profile: RemoteHostProfile) -> Result<RemoteHostProfile, S
 
 /// 删除指定 `id` 的 Profile。返回 true 表示成功删除，false 表示未找到。
 pub fn delete_profile(id: &str) -> Result<bool, String> {
+    let _guard = PROFILE_STORE_LOCK
+        .lock()
+        .map_err(|_| "远程配置锁异常".to_string())?;
     let mut profiles = load_profiles()?;
     let before = profiles.len();
     profiles.retain(|p| p.id != id);

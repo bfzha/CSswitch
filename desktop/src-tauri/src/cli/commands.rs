@@ -20,6 +20,20 @@ const BUNDLED_PROXY: &str = include_str!(concat!(
 const BUNDLED_DSML_SHIM: &str =
     include_str!(concat!(env!("CSSWITCH_BUNDLED_PROXY_DIR"), "/dsml_shim.py"));
 const MANAGED_PROXY_HINT: &str = "~/.csswitch/proxy/csswitch_proxy.py";
+const REAL_SCIENCE_PORT: u16 = 8765;
+
+fn validate_managed_port(port: u16) -> Result<(), CliEnvelope> {
+    if port == 0 {
+        return Err(CliEnvelope::err("invalid_port", "端口不能为 0。"));
+    }
+    if port == REAL_SCIENCE_PORT {
+        return Err(CliEnvelope::err(
+            "reserved_port",
+            "端口 8765 是真实 Science 实例保留端口，不能用。",
+        ));
+    }
+    Ok(())
+}
 
 // ============================================================================
 // 路径工具
@@ -108,7 +122,30 @@ fn key_env_for_adapter(adapter: &str) -> &'static str {
     match adapter {
         "deepseek" => "DEEPSEEK_API_KEY",
         "qwen" => "DASHSCOPE_API_KEY",
+        "openai-custom" | "openai-responses" => "CSSWITCH_OPENAI_KEY",
         _ => "CSSWITCH_RELAY_KEY",
+    }
+}
+
+fn is_native_adapter(adapter: &str) -> bool {
+    matches!(adapter, "deepseek" | "qwen")
+}
+
+fn is_openai_adapter(adapter: &str) -> bool {
+    matches!(adapter, "openai-custom" | "openai-responses")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_adapters_use_openai_key_env() {
+        assert_eq!(key_env_for_adapter("openai-custom"), "CSSWITCH_OPENAI_KEY");
+        assert_eq!(
+            key_env_for_adapter("openai-responses"),
+            "CSSWITCH_OPENAI_KEY"
+        );
     }
 }
 
@@ -128,15 +165,15 @@ fn proxy_launch_from_config(provider: &str) -> Result<Option<ProxyLaunch>, Strin
     if profile.api_key.trim().is_empty() {
         return Ok(None);
     }
-    if adapter == "relay" {
+    if !is_native_adapter(&adapter) {
         if profile.base_url.trim().is_empty()
             || !(profile.base_url.starts_with("http://")
                 || profile.base_url.starts_with("https://"))
         {
-            return Err("relay 配置需要 http(s):// 开头的 base_url。".to_string());
+            return Err("当前配置需要 http(s):// 开头的 base_url。".to_string());
         }
         if profile.model.trim().is_empty() {
-            return Err("relay 配置需要选择或填写模型。".to_string());
+            return Err("当前配置需要选择或填写模型。".to_string());
         }
     }
 
@@ -282,6 +319,10 @@ pub fn cmd_config_save_key(provider: &str, key: &str) -> CliEnvelope {
 
 /// `proxy start <provider> <port> <secret>` — 启动代理进程。
 pub fn cmd_proxy_start(provider: &str, port: u16, secret: &str) -> CliEnvelope {
+    if let Err(err) = validate_managed_port(port) {
+        return err;
+    }
+
     // 检查是否已在运行（通过 TCP 端口探活）
     if is_port_open(port) {
         if proxy_health(port, secret) {
@@ -373,13 +414,20 @@ pub fn cmd_proxy_start(provider: &str, port: u16, secret: &str) -> CliEnvelope {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    if launch.adapter == "relay" {
-        cmd.env("CSSWITCH_RELAY_BASE_URL", &launch.base_url);
-        if !launch.model.is_empty() {
-            cmd.env("CSSWITCH_RELAY_MODEL", &launch.model);
-        }
-        if !launch.thinking_policy.is_empty() {
-            cmd.env("CSSWITCH_RELAY_THINKING", launch.thinking_policy);
+    if !is_native_adapter(&launch.adapter) {
+        if is_openai_adapter(&launch.adapter) {
+            cmd.env("CSSWITCH_OPENAI_BASE_URL", &launch.base_url);
+            if !launch.model.is_empty() {
+                cmd.env("CSSWITCH_OPENAI_MODEL", &launch.model);
+            }
+        } else {
+            cmd.env("CSSWITCH_RELAY_BASE_URL", &launch.base_url);
+            if !launch.model.is_empty() {
+                cmd.env("CSSWITCH_RELAY_MODEL", &launch.model);
+            }
+            if !launch.thinking_policy.is_empty() {
+                cmd.env("CSSWITCH_RELAY_THINKING", launch.thinking_policy);
+            }
         }
     }
 
@@ -487,7 +535,7 @@ pub fn cmd_proxy_stop() -> CliEnvelope {
         return CliEnvelope::ok(json!({
             "message": if stopped_recorded { "已停止记录中的代理进程。" } else { "端口上没有运行中的代理。" },
             "port": port,
-            "stopped": stopped_recorded,
+            "stopped": true,
         }));
     }
 
@@ -495,9 +543,15 @@ pub fn cmd_proxy_stop() -> CliEnvelope {
     if stopped {
         super::proc_manager::record_proxy_stop();
         super::logger::info(&format!("proxy stopped on port {port}"));
+    } else {
+        return CliEnvelope::err_with_hint(
+            "proxy_stop_failed",
+            &format!("端口 {port} 可能未被完全停止。"),
+            "请手动检查该端口上的进程，确认旧代理已停止后再重试。",
+        );
     }
     CliEnvelope::ok(json!({
-        "message": if stopped { format!("端口 {port} 上的代理已停止") } else { format!("端口 {port} 可能未被完全停止，请手动检查") },
+        "message": format!("端口 {port} 上的代理已停止"),
         "port": port,
         "stopped": stopped,
     }))
@@ -848,6 +902,10 @@ pub fn cmd_sandbox_status() -> CliEnvelope {
 /// 用 `ANTHROPIC_BASE_URL` 环境变量指向代理，以独立 data-dir 运行。
 /// 注入虚拟 OAuth 凭证使 Science 认为已登录，仅监听回环地址，外部访问走 SSH 端口转发。
 pub fn cmd_sandbox_start(port: u16, proxy_url: &str) -> CliEnvelope {
+    if let Err(err) = validate_managed_port(port) {
+        return err;
+    }
+
     let bin = match find_cmd("claude-science") {
         Some(b) => b,
         None => {
@@ -963,11 +1021,19 @@ pub fn cmd_sandbox_start(port: u16, proxy_url: &str) -> CliEnvelope {
                     "port": port,
                     "url": url,
                 })),
-                Err(e) => CliEnvelope::err_with_hint(
-                    "sandbox_start_timeout",
-                    &format!("沙箱启动后未就绪：{e}"),
-                    "请查看 helper 的 sandbox.log，确认 claude-science 是否启动成功。",
-                ),
+                Err(e) => {
+                    let _ = Command::new(&bin)
+                        .args(["stop", "--data-dir"])
+                        .arg(&data_dir)
+                        .env("HOME", &sandbox_home)
+                        .output();
+                    terminate_sandbox_processes(&data_dir);
+                    CliEnvelope::err_with_hint(
+                        "sandbox_start_timeout",
+                        &format!("沙箱启动后未就绪：{e}"),
+                        "请查看 helper 的 sandbox.log，确认 claude-science 是否启动成功。",
+                    )
+                }
             }
         }
         Err(e) => CliEnvelope::err_with_hint(

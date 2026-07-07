@@ -180,6 +180,8 @@ let editingMetaId = null;
 let pendingSkipActivateId = null;
 let pendingConfirm = null;
 let pendingAuthPrompt = null;
+let refreshingStatus = false;
+let lastRemoteStatusAt = 0;
 
 let state = {
   profiles: [],
@@ -698,8 +700,13 @@ async function stopAll() {
 }
 
 async function refreshStatus() {
+  const remoteStatus = target === "remote" && currentProfile;
+  const now = Date.now();
+  if (refreshingStatus || (remoteStatus && now - lastRemoteStatusAt < 10000)) return;
+  refreshingStatus = true;
+  if (remoteStatus) lastRemoteStatusAt = now;
   try {
-    const s = target === "remote" && currentProfile
+    const s = remoteStatus
       ? await call("remote_status", { profile: currentProfile })
       : await call("status");
     setLight(els.ltProxy, s.proxy);
@@ -708,6 +715,8 @@ async function refreshStatus() {
     els.brandDot.className = "dot" + (s.proxy === "green" ? "" : " amber");
   } catch (e) {
     [els.ltProxy, els.ltSandbox, els.ltUpstream].forEach((el) => setLight(el, "amber"));
+  } finally {
+    refreshingStatus = false;
   }
 }
 
