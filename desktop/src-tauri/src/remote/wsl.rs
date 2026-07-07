@@ -28,15 +28,78 @@ pub struct WslDistribution {
 }
 
 fn decode_wsl_output(bytes: &[u8]) -> String {
-    if bytes.iter().filter(|byte| **byte == 0).count() > bytes.len().saturating_div(8) {
-        let units = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect::<Vec<_>>();
-        String::from_utf16_lossy(&units)
+    if let Some(boundary) = mixed_wsl_utf16_prefix_boundary(bytes) {
+        let mut decoded = decode_utf16le_lossy(&bytes[..boundary]);
+        decoded.push_str(&String::from_utf8_lossy(&bytes[boundary..]));
+        decoded
+    } else if looks_like_utf16le(bytes) {
+        decode_utf16le_lossy(bytes)
     } else {
         String::from_utf8_lossy(bytes).into_owned()
     }
+}
+
+fn looks_like_utf16le(bytes: &[u8]) -> bool {
+    bytes.iter().filter(|byte| **byte == 0).count() > bytes.len().saturating_div(8)
+}
+
+fn decode_utf16le_lossy(bytes: &[u8]) -> String {
+    let units = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16_lossy(&units)
+}
+
+fn mixed_wsl_utf16_prefix_boundary(bytes: &[u8]) -> Option<usize> {
+    const WSL_PREFIX: &[u8] = b"w\0s\0l\0:\0";
+    if !bytes.starts_with(WSL_PREFIX) {
+        return None;
+    }
+
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let unit = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        if unit == b'\n' as u16 {
+            let next = i + 2;
+            if next < bytes.len() && !looks_like_utf16le_fragment(&bytes[next..]) {
+                return Some(next);
+            }
+        }
+        i += 2;
+    }
+    None
+}
+
+fn looks_like_utf16le_fragment(bytes: &[u8]) -> bool {
+    let pair_count = bytes.len().min(32) / 2;
+    if pair_count == 0 {
+        return false;
+    }
+    let zero_high_bytes = (0..pair_count)
+        .filter(|idx| bytes[idx * 2 + 1] == 0)
+        .count();
+    zero_high_bytes * 2 >= pair_count
+}
+
+fn clean_wsl_stderr(stderr: &str) -> String {
+    let mut cleaned = stderr
+        .lines()
+        .filter(|line| !is_wsl_localhost_proxy_warning(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if stderr.ends_with('\n') && !cleaned.is_empty() {
+        cleaned.push('\n');
+    }
+    cleaned
+}
+
+fn is_wsl_localhost_proxy_warning(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.starts_with("wsl:")
+        && lower.contains("localhost")
+        && lower.contains("nat")
+        && lower.contains("wsl")
 }
 
 pub fn parse_wsl_list_verbose(raw: &str) -> Vec<WslDistribution> {
@@ -109,7 +172,9 @@ pub fn list_wsl_distributions() -> Result<Vec<WslDistribution>, RemoteError> {
         })?;
 
     if !output.status.success() {
-        let stderr = decode_wsl_output(&output.stderr).trim().to_string();
+        let stderr = clean_wsl_stderr(&decode_wsl_output(&output.stderr))
+            .trim()
+            .to_string();
         return Err(map_wsl_error(&stderr, output.status.code(), None));
     }
 
@@ -137,7 +202,7 @@ fn build_wsl_shell_args(profile: &RemoteHostProfile, script: &str) -> Vec<String
         args.extend(["--user".to_string(), profile.username.clone()]);
     }
     args.extend([
-        "--".to_string(),
+        "--exec".to_string(),
         "sh".to_string(),
         "-lc".to_string(),
         script.to_string(),
@@ -405,7 +470,7 @@ fn run_wsl_shell_script_with_stdin(
                 let stderr = ssh::wait_with_timeout(child, Duration::from_secs(timeout_secs))
                     .ok()
                     .flatten()
-                    .map(|output| decode_wsl_output(&output.stderr))
+                    .map(|output| clean_wsl_stderr(&decode_wsl_output(&output.stderr)))
                     .unwrap_or_default();
                 return Err(RemoteError {
                     code: "wsl_stdin_failed".to_string(),
@@ -428,6 +493,7 @@ fn run_wsl_shell_script_with_stdin(
 }
 
 fn wsl_stdin_failed_message(write_error: &std::io::Error, stderr: &str) -> String {
+    let stderr = clean_wsl_stderr(stderr);
     if stderr.trim().is_empty() {
         format!("写入 WSL 命令 stdin 失败：{write_error}")
     } else {
@@ -464,7 +530,9 @@ fn collect_wsl_output(
     };
 
     if !output.status.success() {
-        let stderr = decode_wsl_output(&output.stderr).trim().to_string();
+        let stderr = clean_wsl_stderr(&decode_wsl_output(&output.stderr))
+            .trim()
+            .to_string();
         return Err(map_wsl_error(&stderr, output.status.code(), Some(profile)));
     }
 
@@ -634,6 +702,23 @@ mod tests {
     }
 
     #[test]
+    fn decodes_mixed_wsl_warning_and_utf8_process_stderr() {
+        let warning = "wsl: 检测到 localhost 代理配置，但未镜像到 WSL。NAT 模式下的 WSL 不支持 localhost 代理。\r\n";
+        let mut bytes = warning
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect::<Vec<_>>();
+        bytes.extend_from_slice(
+            "mkdir: cannot create directory '': No such file or directory\n".as_bytes(),
+        );
+
+        let decoded = decode_wsl_output(&bytes);
+
+        assert!(decoded.contains("mkdir: cannot create directory"));
+        assert!(decoded.contains("No such file or directory"));
+    }
+
+    #[test]
     fn builds_wsl_helper_args() {
         let profile = wsl_profile();
         let args = build_wsl_args(&profile, &["status".to_string()]);
@@ -644,7 +729,7 @@ mod tests {
                 "Ubuntu",
                 "--user",
                 "zhawei",
-                "--",
+                "--exec",
                 "sh",
                 "-lc",
                 "~/.csswitch/bin/csswitch-helper --json status"
@@ -674,5 +759,15 @@ mod tests {
 
         assert!(message.contains("pipe ended"));
         assert!(message.contains("user zhawei not found"));
+    }
+
+    #[test]
+    fn wsl_stdin_failed_message_filters_wsl_localhost_proxy_warning() {
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe ended");
+        let stderr = "wsl: 检测到 localhost 代理配置，但未镜像到 WSL。NAT 模式下的 WSL 不支持 localhost 代理。\nmkdir: cannot create directory '': No such file or directory\n";
+        let message = wsl_stdin_failed_message(&err, stderr);
+
+        assert!(!message.contains("localhost"));
+        assert!(message.contains("mkdir: cannot create directory"));
     }
 }
