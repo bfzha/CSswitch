@@ -1299,9 +1299,27 @@ fn status(state: State<'_, Mutex<AppState>>) -> serde_json::Value {
 }
 
 #[tauri::command]
-fn open_url(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
-    let url = { lock(&state).sandbox_url.clone() };
-    let url = url.ok_or("还没有沙箱 URL，请先「一键开始」。")?;
+fn open_url(state: State<'_, Mutex<AppState>>, url: Option<String>) -> Result<(), String> {
+    let url = match url {
+        Some(url) => {
+            let trimmed = url.trim();
+            if trimmed != url {
+                return Err("URL 不能包含首尾空白。".to_string());
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            let allowed = lower.starts_with("http://127.0.0.1:")
+                || lower.starts_with("http://localhost:")
+                || lower.starts_with("http://[::1]:");
+            if !allowed {
+                return Err("只允许打开本地沙箱 URL。".to_string());
+            }
+            url
+        }
+        None => lock(&state)
+            .sandbox_url
+            .clone()
+            .ok_or("还没有沙箱 URL，请先「一键开始」。")?,
+    };
     open_in_browser(&url)
 }
 
@@ -1457,6 +1475,7 @@ pub fn run() {
             remote_commands::remote_save_provider_key,
             remote_commands::remote_start_proxy,
             remote_commands::remote_stop_proxy,
+            remote_commands::remote_stop_all,
             remote_commands::remote_proxy_status,
             remote_commands::remote_verify_key,
             remote_commands::remote_status,

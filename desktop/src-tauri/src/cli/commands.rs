@@ -335,6 +335,27 @@ pub fn cmd_proxy_start(provider: &str, port: u16, secret: &str) -> CliEnvelope {
     };
 
     // 启代理子进程
+    let proxy_log = logs_dir().join("proxy.log");
+    if let Some(parent) = proxy_log.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return CliEnvelope::err("proxy_log_error", &format!("创建代理日志目录失败：{e}"));
+        }
+    }
+    let log_file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&proxy_log)
+    {
+        Ok(file) => file,
+        Err(e) => return CliEnvelope::err("proxy_log_error", &format!("打开 proxy.log 失败：{e}")),
+    };
+    let log_file_for_stderr = match log_file.try_clone() {
+        Ok(file) => file,
+        Err(e) => {
+            return CliEnvelope::err("proxy_log_error", &format!("复制 proxy.log 句柄失败：{e}"))
+        }
+    };
+
     let mut cmd = Command::new(&python);
     cmd.arg(&script)
         .arg("--provider")
@@ -343,7 +364,15 @@ pub fn cmd_proxy_start(provider: &str, port: u16, secret: &str) -> CliEnvelope {
         .arg(port.to_string())
         .arg("--auth-token")
         .arg(secret)
-        .env(launch.key_env, &launch.key);
+        .env(launch.key_env, &launch.key)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_for_stderr));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     if launch.adapter == "relay" {
         cmd.env("CSSWITCH_RELAY_BASE_URL", &launch.base_url);
         if !launch.model.is_empty() {
@@ -354,18 +383,59 @@ pub fn cmd_proxy_start(provider: &str, port: u16, secret: &str) -> CliEnvelope {
         }
     }
 
-    match cmd.stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-        Ok(child) => {
+    match cmd.spawn() {
+        Ok(mut child) => {
             let pid = child.id();
-            // 将 secret 持久化，并记录 PID 到文件供后续查找。
-            let _ = save_proxy_secret(secret);
-            super::proc_manager::record_proxy_start(pid, port, secret);
-            super::logger::info(&format!("proxy started pid={pid} port={port}"));
-            CliEnvelope::ok(json!({
-                "port": port,
-                "pid": pid,
-                "message": "代理已启动",
-            }))
+            for _ in 0..20 {
+                if proxy_health(port, secret) {
+                    let _ = save_proxy_secret(secret);
+                    super::proc_manager::record_proxy_start(pid, port, secret);
+                    super::logger::info(&format!("proxy started pid={pid} port={port}"));
+                    return CliEnvelope::ok(json!({
+                        "port": port,
+                        "pid": pid,
+                        "message": "代理已启动",
+                    }));
+                }
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let detail = fs::read_to_string(&proxy_log)
+                            .ok()
+                            .and_then(|content| {
+                                let tail = content
+                                    .lines()
+                                    .rev()
+                                    .take(20)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                (!tail.trim().is_empty()).then_some(tail)
+                            })
+                            .unwrap_or_else(|| format!("代理进程退出码 {:?}", status.code()));
+                        return CliEnvelope::err_with_hint(
+                            "proxy_start_failed",
+                            &format!("代理启动后立即退出：{detail}"),
+                            "请查看 helper 的 proxy.log，确认 Python、端口和 provider 配置是否正常。",
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return CliEnvelope::err(
+                            "proxy_start_failed",
+                            &format!("检查代理进程状态失败：{e}"),
+                        )
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = terminate_pid(pid);
+            CliEnvelope::err_with_hint(
+                "proxy_start_timeout",
+                &format!("代理启动后未通过健康检查，端口 {port} 未就绪。"),
+                "请查看 helper 的 proxy.log，确认代理是否能监听端口。",
+            )
         }
         Err(e) => {
             let hint = if e.to_string().contains("AddrInUse")

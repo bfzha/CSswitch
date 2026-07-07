@@ -515,6 +515,40 @@ pub fn remote_stop_proxy(profile: RemoteHostProfile) -> Result<(), String> {
     .map_err(|e| e.message)
 }
 
+/// 停止远程沙箱与代理。
+#[tauri::command]
+pub fn remote_stop_all(profile: RemoteHostProfile) -> Result<Value, String> {
+    let sandbox_res = remote::transport::run_helper_json_with_retry::<Value>(
+        &profile,
+        &["sandbox".to_string(), "stop".to_string()],
+    );
+
+    let proxy_res = remote::transport::run_helper_json_with_retry::<Value>(
+        &profile,
+        &["proxy".to_string(), "stop".to_string()],
+    );
+
+    match (sandbox_res, proxy_res) {
+        (Ok(sandbox), Ok(proxy)) => Ok(json!({
+            "ok": true,
+            "sandbox": sandbox,
+            "proxy": proxy,
+        })),
+        (Err(sandbox_err), Ok(_proxy)) => Err(format!(
+            "远程代理已停；但停止远程沙箱失败：{}",
+            sandbox_err.message
+        )),
+        (Ok(_), Err(proxy_err)) => Err(format!(
+            "远程沙箱已停；但停止远程代理失败：{}",
+            proxy_err.message
+        )),
+        (Err(sandbox_err), Err(proxy_err)) => Err(format!(
+            "停止远程沙箱失败：{}；停止远程代理失败：{}",
+            sandbox_err.message, proxy_err.message
+        )),
+    }
+}
+
 /// 查询远程代理状态。
 #[tauri::command]
 pub fn remote_proxy_status(profile: RemoteHostProfile) -> Result<Value, String> {

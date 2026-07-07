@@ -411,6 +411,49 @@ test("remote one-click returns the fresh Science URL from sandbox start", () => 
   assert.match(body, /"local_url": local_url/);
 });
 
+test("remote one-click frontend renders a clickable local URL without auto-opening", () => {
+  const body = frontendFunctionBody("remoteOneClick");
+  assert.doesNotMatch(body, /await openLocalUrl\(localUrl\)/);
+  assert.match(body, /setMsgHtml/);
+  assert.match(body, /data-url=/);
+  assert.match(main, /function setMsgHtml/);
+  assert.match(main, /async function openLocalUrl/);
+  assert.match(main, /call\("open_url", url \? \{ url \} : \{\}\)/);
+  assert.match(main, /els\.msg\.addEventListener\("click"/);
+});
+
+test("browser opener reuses open_url and only accepts local sandbox URLs", () => {
+  const m = libTauri.match(/fn open_url[\s\S]*?\n}\n\n\/\/\/ 运行诊断脚本/);
+  assert.ok(m, "open_url body should be discoverable");
+  const body = m[0];
+  assert.match(body, /url: Option<String>/);
+  assert.match(body, /http:\/\/127\.0\.0\.1:/);
+  assert.match(body, /http:\/\/localhost:/);
+  assert.match(body, /http:\/\/\[::1\]:/);
+  assert.match(body, /只允许打开本地沙箱 URL/);
+  assert.doesNotMatch(libTauri, /fn open_browser_url/);
+});
+
+test("remote stop button stops remote sandbox and proxy", () => {
+  const body = frontendFunctionBody("stopAll");
+  assert.match(body, /target === "remote" && currentProfile/);
+  assert.match(body, /call\("remote_stop_all", \{ profile: currentProfile \}\)/);
+  assert.doesNotMatch(body, /call\("remote_stop_proxy", \{ profile: currentProfile \}\)/);
+  assert.match(body, /远程代理与沙箱已停止/);
+});
+
+test("remote stop-all backend stops sandbox before proxy", () => {
+  const m = remoteCommands.match(/pub fn remote_stop_all[\s\S]*?\n}\n\n\/\/\/ 查询远程代理状态/);
+  assert.ok(m, "remote_stop_all body should be discoverable");
+  const body = m[0];
+  assert.match(body, /"sandbox"\.to_string\(\),\s*"stop"\.to_string\(\)[\s\S]*"proxy"\.to_string\(\),\s*"stop"\.to_string\(\)/);
+  assert.ok(
+    body.indexOf('"sandbox".to_string()') < body.indexOf('"proxy".to_string()'),
+    "remote_stop_all should stop sandbox before proxy",
+  );
+  assert.match(body, /远程代理已停；但停止远程沙箱失败/);
+});
+
 test("remote helper status reports the configured sandbox state", () => {
   assert.match(helperCommands, /fn sandbox_is_running/);
   assert.match(helperCommands, /fn get_configured_sandbox_port/);
@@ -518,4 +561,16 @@ test("remote helper clears an unhealthy proxy port before spawning a replacement
   assert.match(helperCommands, /stop_recorded_proxy\(port\)/);
   assert.match(helperCommands, /clear_unhealthy_proxy_port\(port\)/);
   assert.match(helperCommands, /port_in_use/);
+});
+
+test("remote helper proxy start detaches and waits for health", () => {
+  const m = helperCommands.match(/pub fn cmd_proxy_start[\s\S]*?\n}\n\n\/\/\/ `proxy status`/);
+  assert.ok(m, "cmd_proxy_start body should be discoverable");
+  const body = m[0];
+  assert.match(body, /proxy\.log/);
+  assert.match(body, /stdin\(Stdio::null\(\)\)/);
+  assert.match(body, /process_group\(0\)/);
+  assert.match(body, /proxy_health\(port, secret\)/);
+  assert.match(body, /try_wait\(\)/);
+  assert.match(body, /proxy_start_timeout/);
 });

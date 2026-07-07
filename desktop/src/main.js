@@ -155,6 +155,7 @@ function mockInvoke(cmd, args) {
         tunnel_hint: "ssh -N -L " + args.sandboxPort + ":127.0.0.1:" + args.sandboxPort + " user@host",
       });
     case "remote_stop_proxy":
+    case "remote_stop_all":
       return Promise.resolve(null);
     case "remote_logs":
       return Promise.resolve({ content: "预览模式：无日志" });
@@ -206,6 +207,14 @@ function setMsg(text, kind) {
   els.msg.className = "msg" + (kind ? " " + kind : "");
   const feedback = els.msg.closest(".feedback");
   if (feedback) feedback.hidden = !text;
+}
+
+function setMsgHtml(html, kind) {
+  if (!els.msg) return;
+  els.msg.innerHTML = html || "";
+  els.msg.className = "msg" + (kind ? " " + kind : "");
+  const feedback = els.msg.closest(".feedback");
+  if (feedback) feedback.hidden = !html;
 }
 
 function setLight(el, value) {
@@ -674,8 +683,8 @@ async function stopAll() {
   setBusy(true);
   try {
     if (target === "remote" && currentProfile) {
-      await call("remote_stop_proxy", { profile: currentProfile });
-      setMsg("远程代理已停止。", "ok");
+      await call("remote_stop_all", { profile: currentProfile });
+      setMsg("远程代理与沙箱已停止。", "ok");
     } else {
       await call("stop_all");
       setMsg("已停止代理与沙箱。", "ok");
@@ -705,6 +714,14 @@ async function refreshStatus() {
 async function openBrowser() {
   try {
     await call("open_url", {});
+  } catch (e) {
+    setMsg("打开浏览器失败：" + e, "err");
+  }
+}
+
+async function openLocalUrl(url) {
+  try {
+    await call("open_url", url ? { url } : {});
   } catch (e) {
     setMsg("打开浏览器失败：" + e, "err");
   }
@@ -1271,7 +1288,12 @@ async function remoteOneClick() {
     });
     const localUrl = (r && r.local_url) || ("http://127.0.0.1:" + sandboxPort);
     const tunnelHint = r && r.tunnel_hint ? "\n端口转发：" + r.tunnel_hint : "";
-    setMsg("远程代理与沙箱已启动。\n本地访问：" + localUrl + tunnelHint, "ok");
+    setMsgHtml(
+      "远程代理与沙箱已启动。<br>本地访问：" +
+        '<a href="#" class="launch-url" data-url="' + escapeHtml(localUrl) + '">' + escapeHtml(localUrl) + "</a>" +
+        escapeHtml(tunnelHint),
+      "ok",
+    );
     await refreshStatus();
   } catch (e) {
     setMsg("远程一键开始失败：" + e, "err");
@@ -1344,6 +1366,12 @@ function wire() {
   els.oneClickBtn.addEventListener("click", oneClick);
   els.stopBtn.addEventListener("click", stopAll);
   els.openBrowserBtn.addEventListener("click", openBrowser);
+  els.msg.addEventListener("click", (e) => {
+    const link = e.target.closest("[data-url]");
+    if (!link) return;
+    e.preventDefault();
+    openLocalUrl(link.dataset.url);
+  });
   els.doctorBtn.addEventListener("click", runDoctor);
   els.updateBtn.addEventListener("click", checkUpdate);
   els.reportBtn.addEventListener("click", () => call("report_bug").catch((e) => setMsg("打开反馈页失败：" + e, "err")));
