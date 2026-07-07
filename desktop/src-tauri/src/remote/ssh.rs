@@ -46,12 +46,14 @@ pub(crate) const SLOW_CMD_TIMEOUT_SECS: u64 = 120;
 /// 默认重试次数。
 pub(crate) const DEFAULT_RETRIES: u32 = 3;
 /// Helper 发布的 GitHub 仓库（可通过环境变量覆盖）。
-const HELPER_RELEASE_REPO: &str = "SuperJJ007/CSswitch";
-const HELPER_RELEASE_REPO_ENV: &str = "CSSWITCH_HELPER_RELEASE_REPO";
+pub(crate) const HELPER_RELEASE_REPO_ENV: &str = "CSSWITCH_HELPER_RELEASE_REPO";
+// Current fork publishes helper release assets here.
+// If this change is merged upstream, switch this default back to SuperJJ007/CSswitch.
+pub(crate) const HELPER_RELEASE_REPO: &str = "bfzha/CSswitch";
 
 /// 校验 GitHub owner/repo 格式，防止命令注入。
 /// 只允许字母、数字、连字符、下划线、点。
-fn validate_repo_format(repo: &str) -> Option<&str> {
+pub(crate) fn validate_repo_format(repo: &str) -> Option<&str> {
     let repo = repo.trim();
     if repo.is_empty() {
         return None;
@@ -167,6 +169,8 @@ pub fn build_helper_install_command_spec(
         .and_then(|v| validate_repo_format(&v).map(String::from))
         .unwrap_or_else(|| HELPER_RELEASE_REPO.to_string());
 
+    let helper_version = env!("CARGO_PKG_VERSION");
+
     // P0-2: 安装脚本中加入架构白名单校验，防止注入
     // 即使攻击者控制了 uname 输出，也只能匹配预定义的安全值
     let script = format!(
@@ -206,9 +210,9 @@ case "$OS_RAW" in
     ;;
 esac
 
-# 尝试从 GitHub API 获取最新 release 的下载 URL
+# 尝试从 GitHub API 获取与桌面端同版本 release 的下载 URL
 # 使用硬编码的文件名模式，防止通配符注入
-API_URL="https://api.github.com/repos/{repo}/releases/latest"
+API_URL="https://api.github.com/repos/{repo}/releases/tags/v{helper_version}"
 BINARY_NAME="csswitch-helper-${{OS}}-${{ARCH}}"
 
 # 从 API 响应中提取匹配的下载 URL
@@ -254,6 +258,7 @@ mv "$TMP" "$HELPER_PATH"
 "#,
         helper_path = helper_path,
         repo = repo,
+        helper_version = helper_version,
     );
     args.push(script);
     SshCommandSpec {
@@ -900,9 +905,7 @@ fn map_ssh_error(profile: &RemoteHostProfile, stderr: &str, exit_code: Option<i3
     // 认证失败（不可重试）
     // 注意：只包含 "permission denied" 但没有 "publickey"/"authentication failed"
     // 的是文件权限错误，由后面 permission_denied 分支处理。
-    if stderr_lower.contains("publickey")
-        || stderr_lower.contains("authentication failed")
-    {
+    if stderr_lower.contains("publickey") || stderr_lower.contains("authentication failed") {
         return RemoteError {
             code: "ssh_auth_failed".to_string(),
             message: "SSH 认证失败，请检查用户名和密钥配置".to_string(),

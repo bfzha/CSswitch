@@ -13,7 +13,8 @@
 //! 4. 便利操作 — 一键开始、日志查看、诊断
 
 use crate::remote::{
-    self, RemoteAuthMethod, RemoteHealth, RemoteHostProfile, RemoteTargetKind, REQUIRED_CAPABILITIES,
+    self, RemoteAuthMethod, RemoteHealth, RemoteHostProfile, RemoteTargetKind,
+    REQUIRED_CAPABILITIES,
 };
 use crate::{config, templates};
 use serde_json::{json, Value};
@@ -84,7 +85,8 @@ pub fn remote_delete_profile(id: String) -> Result<bool, String> {
     }
     let deleted = remote::delete_profile(&id)?;
     if deleted {
-        let _ = remote::credentials::delete_secret(&id, remote::credentials::CredentialKind::Password);
+        let _ =
+            remote::credentials::delete_secret(&id, remote::credentials::CredentialKind::Password);
         if let Some(RemoteHostProfile {
             auth_method: RemoteAuthMethod::KeyFile { path, .. },
             ..
@@ -222,10 +224,12 @@ fn helper_ready_for_profile(health: &RemoteHealth) -> bool {
         .iter()
         .chain(["sandbox"].iter())
         .all(|req| health.capabilities.iter().any(|cap| cap.as_str() == *req));
+    let version_matches = health.helper_version.as_deref() == Some(health.desktop_version.as_str());
 
     health.reachable
         && health.helper_installed
         && health.compatible
+        && version_matches
         && health.platform.as_deref() == Some("linux")
         && has_required
 }
@@ -275,11 +279,56 @@ fn install_helper_from_bundle(
         .map_err(|e| e.message)
 }
 
+fn install_or_update_helper(
+    app: &tauri::AppHandle,
+    profile: &RemoteHostProfile,
+    arch: &str,
+) -> Result<(), String> {
+    match profile.kind {
+        RemoteTargetKind::Wsl => {
+            let bundle_result = install_helper_from_bundle(app, profile, arch);
+            if let Err(bundle_err) = bundle_result {
+                install_helper_from_github(profile).map_err(|github_err| {
+                    format!(
+                        "自动安装 Helper 失败。内置上传失败：{bundle_err}；GitHub 下载失败：{github_err}"
+                    )
+                })?;
+            }
+            Ok(())
+        }
+        RemoteTargetKind::Ssh => {
+            let github_result = install_helper_from_github(profile);
+            if let Err(github_err) = github_result {
+                install_helper_from_bundle(app, profile, arch).map_err(|bundle_err| {
+                    format!(
+                        "自动安装 Helper 失败。GitHub 下载失败：{github_err}；内置上传失败：{bundle_err}"
+                    )
+                })?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// 安装/升级远程 Helper。
 /// 通过 SSH 执行安装脚本：从 GitHub Releases 下载 helper 二进制到远程服务器。
 #[tauri::command]
-pub fn remote_install_helper(profile: RemoteHostProfile) -> Result<RemoteHealth, String> {
-    install_helper_from_github(&profile)?;
+pub fn remote_install_helper(
+    app: tauri::AppHandle,
+    profile: RemoteHostProfile,
+) -> Result<RemoteHealth, String> {
+    remote::validate_profile(&profile)?;
+    let (os, arch) = remote::transport::detect_remote_platform(&profile)
+        .map_err(|e| format!("连接目标失败：{}", e.message))?;
+    if os != "linux" {
+        return Err(format!(
+            "远程 Helper 目前仅支持 Linux，当前服务器是 {os}/{arch}。"
+        ));
+    }
+    if arch != "x86_64" && arch != "aarch64" {
+        return Err(format!("远程 Helper 暂不支持 {arch} 架构。"));
+    }
+    install_or_update_helper(&app, &profile, &arch)?;
     let health = remote_check_health_uncached(&profile);
     cache_health(&profile.id, &health);
     Ok(health)
@@ -309,14 +358,7 @@ pub fn remote_prepare_helper(
         return Err(format!("远程 Helper 暂不支持 {arch} 架构。"));
     }
 
-    let github_result = install_helper_from_github(&profile);
-    if let Err(github_err) = github_result {
-        install_helper_from_bundle(&app, &profile, &arch).map_err(|bundle_err| {
-            format!(
-                "自动安装 Helper 失败。GitHub 下载失败：{github_err}；内置上传失败：{bundle_err}"
-            )
-        })?;
-    }
+    install_or_update_helper(&app, &profile, &arch)?;
 
     let health = remote_check_health_uncached(&profile);
     cache_health(&profile.id, &health);
@@ -685,10 +727,7 @@ fn health_from_status_result(
             capabilities: vec![],
             proxy_running: false,
             sandbox_running: false,
-            last_error: Some(format!(
-                "无法连接到目标。请检查连接配置：{}",
-                e.message
-            )),
+            last_error: Some(format!("无法连接到目标。请检查连接配置：{}", e.message)),
             last_check: now,
         },
     }
@@ -704,23 +743,35 @@ fn parse_health_from_status(status: &Value, now: i64) -> RemoteHealth {
         })
         .unwrap_or_default();
 
-    // 兼容性检查：所需能力是否齐全
-    let compatible = REQUIRED_CAPABILITIES
+    let helper_version = status["version"].as_str().map(String::from);
+    let desktop_version = env!("CARGO_PKG_VERSION").to_string();
+    let version_matches = helper_version.as_deref() == Some(desktop_version.as_str());
+
+    // 兼容性检查：所需能力是否齐全，且 helper 与桌面端同版本。
+    let has_required_capabilities = REQUIRED_CAPABILITIES
         .iter()
         .all(|req| capabilities.iter().any(|c| c == *req));
+    let compatible = has_required_capabilities && version_matches;
+    let last_error = if !version_matches {
+        Some("Helper 版本与桌面端不一致，需要更新 Helper。".to_string())
+    } else if !has_required_capabilities {
+        Some("Helper 能力不完整，需要更新 Helper。".to_string())
+    } else {
+        None
+    };
 
     RemoteHealth {
         reachable: true,
         helper_installed: true,
-        helper_version: status["version"].as_str().map(String::from),
-        desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+        helper_version,
+        desktop_version,
         compatible,
         platform: status["platform"].as_str().map(String::from),
         arch: status["arch"].as_str().map(String::from),
         capabilities,
         proxy_running: status["proxy_running"].as_bool().unwrap_or(false),
         sandbox_running: status["sandbox_running"].as_bool().unwrap_or(false),
-        last_error: None,
+        last_error,
         last_check: now,
     }
 }
@@ -747,6 +798,49 @@ mod tests {
         assert!(health.reachable);
         assert!(!health.helper_installed);
         assert_eq!(health.last_check, 123);
+    }
+
+    #[test]
+    fn helper_status_is_compatible_when_version_matches_and_capabilities_complete() {
+        let status = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "platform": "linux",
+            "arch": "x86_64",
+            "capabilities": ["proxy", "config", "logs", "doctor", "verify", "sandbox"],
+            "proxy_running": false,
+            "sandbox_running": false
+        });
+
+        let health = parse_health_from_status(&status, 123);
+
+        assert!(health.compatible);
+        assert!(helper_ready_for_profile(&health));
+        assert_eq!(
+            health.helper_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(health.desktop_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn helper_status_is_incompatible_when_version_differs() {
+        let status = serde_json::json!({
+            "version": "0.0.0",
+            "platform": "linux",
+            "arch": "x86_64",
+            "capabilities": ["proxy", "config", "logs", "doctor", "verify", "sandbox"],
+            "proxy_running": false,
+            "sandbox_running": false
+        });
+
+        let health = parse_health_from_status(&status, 123);
+
+        assert!(!health.compatible);
+        assert!(!helper_ready_for_profile(&health));
+        assert_eq!(
+            health.last_error.as_deref(),
+            Some("Helper 版本与桌面端不一致，需要更新 Helper。")
+        );
     }
 
     #[test]

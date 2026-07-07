@@ -103,7 +103,9 @@ pub fn list_wsl_distributions() -> Result<Vec<WslDistribution>, RemoteError> {
             message: format!("无法执行 wsl.exe：{e}"),
             details: Some("请确认 Windows Subsystem for Linux 已安装并在 PATH 中。".to_string()),
             recoverable: false,
-            suggestion: Some("请先安装 WSL 和 Ubuntu，或在终端运行 wsl.exe --list --verbose 验证。".to_string()),
+            suggestion: Some(
+                "请先安装 WSL 和 Ubuntu，或在终端运行 wsl.exe --list --verbose 验证。".to_string(),
+            ),
         })?;
 
     if !output.status.success() {
@@ -134,7 +136,12 @@ fn build_wsl_shell_args(profile: &RemoteHostProfile, script: &str) -> Vec<String
     if !profile.username.trim().is_empty() {
         args.extend(["--user".to_string(), profile.username.clone()]);
     }
-    args.extend(["--".to_string(), "sh".to_string(), "-lc".to_string(), script.to_string()]);
+    args.extend([
+        "--".to_string(),
+        "sh".to_string(),
+        "-lc".to_string(),
+        script.to_string(),
+    ]);
     args
 }
 
@@ -203,7 +210,9 @@ pub fn run_helper_json_slow<T: DeserializeOwned>(
     )
 }
 
-pub fn detect_remote_platform(profile: &RemoteHostProfile) -> Result<(String, String), RemoteError> {
+pub fn detect_remote_platform(
+    profile: &RemoteHostProfile,
+) -> Result<(String, String), RemoteError> {
     let script = "printf '%s %s\\n' \"$(uname -s)\" \"$(uname -m)\"";
     let stdout = run_wsl_shell_script(profile, script, ssh::DEFAULT_CMD_TIMEOUT_SECS)?;
     let mut parts = stdout.split_whitespace();
@@ -222,9 +231,92 @@ pub fn detect_remote_platform(profile: &RemoteHostProfile) -> Result<(String, St
 }
 
 pub fn run_helper_install(profile: &RemoteHostProfile) -> Result<String, RemoteError> {
+    let helper_path = ssh::shell_quote(&profile.helper_path);
+    let repo = std::env::var(ssh::HELPER_RELEASE_REPO_ENV)
+        .ok()
+        .and_then(|v| ssh::validate_repo_format(&v).map(String::from))
+        .unwrap_or_else(|| ssh::HELPER_RELEASE_REPO.to_string());
+    let helper_version = env!("CARGO_PKG_VERSION");
     let script = format!(
-        "set -e; helper_path={}; if [ -x \"$helper_path\" ]; then \"$helper_path\" --json status; else echo 'Helper not installed' >&2; exit 127; fi",
-        ssh::shell_quote(&profile.helper_path)
+        r#"set -e
+HELPER_PATH={helper_path}
+HELPER_DIR=$(dirname "$HELPER_PATH")
+mkdir -p "$HELPER_DIR"
+
+download() {{
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    echo "WSL 发行版需要 curl 或 wget 来下载 helper。请手动安装。" >&2
+    exit 1
+  fi
+}}
+
+ARCH_RAW=$(uname -m)
+case "$ARCH_RAW" in
+  x86_64|amd64) ARCH=x86_64 ;;
+  aarch64|arm64) ARCH=aarch64 ;;
+  *)
+    echo "不支持的架构: $ARCH_RAW（仅支持 x86_64/aarch64）" >&2
+    exit 1
+    ;;
+esac
+
+OS_RAW=$(uname -s)
+case "$OS_RAW" in
+  Linux) OS=linux ;;
+  *)
+    echo "不支持的操作系统: $OS_RAW（仅支持 Linux）" >&2
+    exit 1
+    ;;
+esac
+
+API_URL="https://api.github.com/repos/{repo}/releases/tags/v{helper_version}"
+BINARY_NAME="csswitch-helper-${{OS}}-${{ARCH}}"
+API_JSON=$(mktemp)
+download "$API_URL" "$API_JSON"
+
+if command -v jq >/dev/null 2>&1; then
+  DOWNLOAD_URL=$(jq -r ".assets[] | select(.name==\"$BINARY_NAME\") | .browser_download_url" "$API_JSON" 2>/dev/null || true)
+elif command -v python3 >/dev/null 2>&1; then
+  DOWNLOAD_URL=$(python3 -c "
+import json,sys
+data=json.load(open('$API_JSON'))
+for a in data.get('assets',[]):
+    if a.get('name')=='$BINARY_NAME':
+        print(a['browser_download_url'])
+        break
+" 2>/dev/null || true)
+else
+  DOWNLOAD_URL=$(awk -v name="\"$BINARY_NAME\"" '
+    $0 ~ name {{ found=1 }}
+    found && /browser_download_url/ {{
+      if (match($0, /https:[^"]+/)) {{
+        print substr($0, RSTART, RLENGTH)
+        exit
+      }}
+    }}
+  ' "$API_JSON" || true)
+fi
+rm -f "$API_JSON"
+
+if [ -z "$DOWNLOAD_URL" ]; then
+  echo "无法从 GitHub Releases 获取 $BINARY_NAME 下载链接。" >&2
+  echo "手动安装: wget <url> -O $HELPER_PATH && chmod +x $HELPER_PATH" >&2
+  exit 1
+fi
+
+TMP=$(mktemp)
+download "$DOWNLOAD_URL" "$TMP"
+chmod +x "$TMP"
+mv "$TMP" "$HELPER_PATH"
+"$HELPER_PATH" --json status
+"#,
+        helper_path = helper_path,
+        repo = repo,
+        helper_version = helper_version,
     );
     run_wsl_shell_script(profile, &script, ssh::SLOW_CMD_TIMEOUT_SECS)
 }
@@ -290,7 +382,11 @@ fn run_wsl_shell_script_with_stdin(
 
     let mut command = ssh::hide_cmd(Command::new(WSL_EXE));
     command.args(&args);
-    command.stdin(if stdin_bytes.is_empty() { Stdio::null() } else { Stdio::piped() });
+    command.stdin(if stdin_bytes.is_empty() {
+        Stdio::null()
+    } else {
+        Stdio::piped()
+    });
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -304,17 +400,42 @@ fn run_wsl_shell_script_with_stdin(
 
     if !stdin_bytes.is_empty() {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(stdin_bytes).map_err(|e| RemoteError {
-                code: "wsl_stdin_failed".to_string(),
-                message: format!("写入 WSL 命令 stdin 失败：{e}"),
-                details: None,
-                recoverable: true,
-                suggestion: Some("请重试；如果仍失败，请检查系统资源。".to_string()),
-            })?;
+            if let Err(write_error) = stdin.write_all(stdin_bytes) {
+                drop(stdin);
+                let stderr = ssh::wait_with_timeout(child, Duration::from_secs(timeout_secs))
+                    .ok()
+                    .flatten()
+                    .map(|output| decode_wsl_output(&output.stderr))
+                    .unwrap_or_default();
+                return Err(RemoteError {
+                    code: "wsl_stdin_failed".to_string(),
+                    message: wsl_stdin_failed_message(&write_error, &stderr),
+                    details: if stderr.trim().is_empty() {
+                        None
+                    } else {
+                        Some(stderr)
+                    },
+                    recoverable: true,
+                    suggestion: Some(
+                        "请确认 WSL 发行版、Linux 用户和 Helper 路径权限正确。".to_string(),
+                    ),
+                });
+            }
         }
     }
 
     collect_wsl_output(profile, child, timeout_secs)
+}
+
+fn wsl_stdin_failed_message(write_error: &std::io::Error, stderr: &str) -> String {
+    if stderr.trim().is_empty() {
+        format!("写入 WSL 命令 stdin 失败：{write_error}")
+    } else {
+        format!(
+            "写入 WSL 命令 stdin 失败：{write_error}；WSL 错误：{}",
+            stderr.trim()
+        )
+    }
 }
 
 fn collect_wsl_output(
@@ -373,7 +494,19 @@ fn map_wsl_error(
     profile: Option<&RemoteHostProfile>,
 ) -> RemoteError {
     let lower = stderr.to_lowercase();
-    if lower.contains("not installed") || lower.contains("wslregisterdistribution failed") {
+    if lower.contains("helper not installed") {
+        return RemoteError {
+            code: "helper_not_found".to_string(),
+            message: "WSL Helper 未安装或路径不正确".to_string(),
+            details: Some(stderr.to_string()),
+            recoverable: false,
+            suggestion: Some("请点击“安装 / 更新 Helper”，或检查 Helper 路径。".to_string()),
+        };
+    }
+    if lower.contains("wslregisterdistribution failed")
+        || lower.contains("windows subsystem for linux has no installed distributions")
+        || lower.contains("wsl 2 requires an update")
+    {
         return RemoteError {
             code: "wsl_not_installed".to_string(),
             message: "未找到可用的 WSL 环境".to_string(),
@@ -404,10 +537,15 @@ fn map_wsl_error(
             message: format!("WSL 用户不存在或无法启动：{user}"),
             details: Some(stderr.to_string()),
             recoverable: false,
-            suggestion: Some("请确认该 Linux 用户存在，或在 WSL 中运行 whoami 查看用户名。".to_string()),
+            suggestion: Some(
+                "请确认该 Linux 用户存在，或在 WSL 中运行 whoami 查看用户名。".to_string(),
+            ),
         };
     }
-    if lower.contains("no such file") || lower.contains("not found") || stderr.contains("没有那个文件或目录") {
+    if lower.contains("no such file")
+        || lower.contains("not found")
+        || stderr.contains("没有那个文件或目录")
+    {
         return RemoteError {
             code: "helper_not_found".to_string(),
             message: "WSL Helper 未安装或路径不正确".to_string(),
@@ -485,7 +623,8 @@ mod tests {
 
     #[test]
     fn decodes_utf16le_wsl_output() {
-        let raw = "  NAME            STATE           VERSION\n* Ubuntu          Running         2\n";
+        let raw =
+            "  NAME            STATE           VERSION\n* Ubuntu          Running         2\n";
         let bytes = raw
             .encode_utf16()
             .flat_map(|unit| unit.to_le_bytes())
@@ -511,5 +650,29 @@ mod tests {
                 "~/.csswitch/bin/csswitch-helper --json status"
             ]
         );
+    }
+
+    #[test]
+    fn maps_helper_not_installed_to_helper_not_found() {
+        let err = map_wsl_error("Helper not installed", Some(127), None);
+
+        assert_eq!(err.code, "helper_not_found");
+        assert!(err.message.contains("Helper"));
+    }
+
+    #[test]
+    fn maps_real_wsl_not_installed_to_wsl_not_installed() {
+        let err = map_wsl_error("WslRegisterDistribution failed with error", Some(1), None);
+
+        assert_eq!(err.code, "wsl_not_installed");
+    }
+
+    #[test]
+    fn wsl_stdin_failed_message_includes_stderr_when_available() {
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe ended");
+        let message = wsl_stdin_failed_message(&err, "user zhawei not found\n");
+
+        assert!(message.contains("pipe ended"));
+        assert!(message.contains("user zhawei not found"));
     }
 }

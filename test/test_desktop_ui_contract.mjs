@@ -6,6 +6,7 @@ const html = readFileSync(new URL("../desktop/src/index.html", import.meta.url),
 const main = readFileSync(new URL("../desktop/src/main.js", import.meta.url), "utf8");
 const remoteCommands = readFileSync(new URL("../desktop/src-tauri/src/remote_commands.rs", import.meta.url), "utf8");
 const remoteSsh = readFileSync(new URL("../desktop/src-tauri/src/remote/ssh.rs", import.meta.url), "utf8");
+const remoteWsl = readFileSync(new URL("../desktop/src-tauri/src/remote/wsl.rs", import.meta.url), "utf8");
 const helperCommands = readFileSync(new URL("../desktop/src-tauri/src/cli/commands.rs", import.meta.url), "utf8");
 const libTauri = readFileSync(new URL("../desktop/src-tauri/src/lib_tauri.rs", import.meta.url), "utf8");
 const tauriConf = readFileSync(new URL("../desktop/src-tauri/tauri.conf.json", import.meta.url), "utf8");
@@ -138,8 +139,8 @@ test("remote password login uses a transient password instead of requiring syste
   assert.match(saveBody, /withTransientPassword\(profile,\s*loginSecret\)/);
   assert.match(saveBody, /stripTransientPassword\(profileForConnection\)/);
   assert.match(testBody, /withTransientPassword\(profile,\s*loginSecret\)/);
-  assert.match(saveBody, /rememberPasswordAfterConnection\(profile\.id,\s*authMethod,\s*loginSecret\)/);
-  assert.match(testBody, /rememberPasswordAfterConnection\(profile\.id,\s*authMethod,\s*loginSecret\)/);
+  assert.match(saveBody, /rememberPasswordAfterConnection\(profile\.id,\s*profile\.authMethod,\s*loginSecret\)/);
+  assert.match(testBody, /rememberPasswordAfterConnection\(profile\.id,\s*profile\.authMethod,\s*loginSecret\)/);
   assert.match(rememberBody[0], /saveRemoteLoginSecret/);
   assert.match(rememberBody[0], /deleteRemoteLoginSecret/);
   assert.ok(
@@ -168,11 +169,29 @@ test("remote helper preparation installs only when health is not ready and falls
   assert.ok(m, "remote_prepare_helper body should be discoverable");
   const body = m[0];
   assert.match(body, /helper_ready_for_profile/);
-  assert.match(body, /install_helper_from_github/);
-  assert.match(body, /install_helper_from_bundle/);
+  assert.match(body, /install_or_update_helper/);
+});
+
+test("remote helper preparation uses target-specific install ordering", () => {
+  const start = remoteCommands.indexOf("fn install_or_update_helper");
+  assert.notEqual(start, -1, "install_or_update_helper body should be discoverable");
+  const end = remoteCommands.indexOf("\n\n/// 安装/升级远程 Helper", start);
+  assert.notEqual(end, -1, "install_or_update_helper body should end before remote_install_helper");
+  const body = remoteCommands.slice(start, end);
+
+  assert.match(body, /RemoteTargetKind::Wsl/);
+  assert.match(body, /RemoteTargetKind::Ssh/);
+
+  const wslBranch = body.match(/RemoteTargetKind::Wsl[\s\S]*?RemoteTargetKind::Ssh/)[0];
   assert.ok(
-    body.indexOf("install_helper_from_github") < body.indexOf("install_helper_from_bundle"),
-    "GitHub release install should be attempted before bundled upload fallback",
+    wslBranch.indexOf("install_helper_from_bundle") < wslBranch.indexOf("install_helper_from_github"),
+    "WSL should prefer bundled upload before GitHub download",
+  );
+
+  const sshBranch = body.match(/RemoteTargetKind::Ssh[\s\S]*?$/)[0];
+  assert.ok(
+    sshBranch.indexOf("install_helper_from_github") < sshBranch.indexOf("install_helper_from_bundle"),
+    "SSH should prefer GitHub download before bundled upload",
   );
 });
 
@@ -185,9 +204,50 @@ test("remote bundled helper upload uses SSH stdin and installs atomically", () =
 });
 
 test("remote github helper installer extracts browser download url after matching asset name", () => {
+  assert.match(remoteSsh, /releases\/tags\/v\{helper_version\}/);
+  assert.doesNotMatch(remoteSsh, /releases\/latest/);
   assert.match(remoteSsh, /BINARY_NAME="csswitch-helper-\$\{\{OS\}\}-\$\{\{ARCH\}\}"/);
   assert.match(remoteSsh, /browser_download_url/);
   assert.match(remoteSsh, /awk -v name=/);
+});
+
+test("wsl github helper installer downloads release asset instead of only checking status", () => {
+  assert.match(remoteWsl, /API_URL="https:\/\/api\.github\.com\/repos\/\{repo\}\/releases\/tags\/v\{helper_version\}"/);
+  assert.match(remoteWsl, /BINARY_NAME="csswitch-helper-\$\{\{OS\}\}-\$\{\{ARCH\}\}"/);
+  assert.match(remoteWsl, /browser_download_url/);
+  const installer = remoteWsl.match(/pub fn run_helper_install[\s\S]*?\n}\n\npub fn install_helper_from_stdin/);
+  assert.ok(installer, "WSL helper installer should be discoverable");
+  assert.doesNotMatch(installer[0], /Helper not installed/);
+});
+
+test("helper release repo defaults to fork and supports env override", () => {
+  assert.match(remoteSsh, /CSSWITCH_HELPER_RELEASE_REPO/);
+  assert.match(remoteSsh, /bfzha\/CSswitch/);
+  assert.match(remoteSsh, /SuperJJ007\/CSswitch/);
+  assert.match(remoteSsh, /merged upstream|合并回上游|upstream/i);
+});
+
+test("saving remote profile fails before persisting when helper preparation fails", () => {
+  const body = frontendFunctionBody("saveProfile");
+  assert.ok(
+    body.indexOf('call("remote_prepare_helper"') < body.indexOf('call("remote_save_profile"'),
+    "helper preparation must happen before profile persistence",
+  );
+});
+
+test("manual helper install command reuses target-specific install ordering", () => {
+  const m = remoteCommands.match(/pub fn remote_install_helper[\s\S]*?\n}\n\n#\[tauri::command\]\npub fn remote_prepare_helper/);
+  assert.ok(m, "remote_install_helper body should be discoverable");
+  assert.match(m[0], /app: tauri::AppHandle/);
+  assert.match(m[0], /detect_remote_platform/);
+  assert.match(m[0], /install_or_update_helper\(&app, &profile, &arch\)/);
+});
+
+test("github helper installers avoid latest so helper version matches desktop", () => {
+  assert.doesNotMatch(remoteSsh, /releases\/latest/);
+  assert.doesNotMatch(remoteWsl, /releases\/latest/);
+  assert.match(remoteSsh, /releases\/tags\/v\{helper_version\}/);
+  assert.match(remoteWsl, /releases\/tags\/v\{helper_version\}/);
 });
 
 test("desktop bundle and release workflow provide linux helper assets for upload fallback", () => {
