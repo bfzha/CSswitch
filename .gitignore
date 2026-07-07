@@ -25,6 +25,7 @@ build/
 # macOS 与工作区杂物
 .DS_Store
 .superpowers/
+.vscode/
 
 # 本地开发工作流文档（brainstorm→spec→plan），不上传公开仓库
 docs/superpowers/
@@ -44,3 +45,6 @@ scratchpad/
 
 # Local seed files.
 .seed
+.agent
+
+docs/my_docs/
