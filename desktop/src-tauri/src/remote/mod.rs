@@ -15,7 +15,9 @@ pub mod credentials;
 pub mod prompt;
 pub mod ssh;
 pub mod store;
+pub mod transport;
 pub mod types;
+pub mod wsl;
 
 // 重新导出常用类型和函数，方便外部模块使用。
 pub use store::*;

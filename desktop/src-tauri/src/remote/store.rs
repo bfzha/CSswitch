@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::types::{RemoteAuthMethod, RemoteHostProfile};
+use super::types::{RemoteAuthMethod, RemoteHostProfile, RemoteTargetKind};
 
 /// 返回远程 Profile 文件的完整路径：`~/.csswitch/remote-hosts.json`。
 /// 跨平台：使用 `dirs::home_dir()` 获取用户主目录。
@@ -167,14 +167,29 @@ pub fn validate_profile(profile: &RemoteHostProfile) -> Result<(), String> {
     if profile.id.trim().is_empty() {
         return Err("远程服务器 Profile ID 不得为空".into());
     }
-    if profile.host.trim().is_empty() {
-        return Err("远程服务器地址不得为空".into());
+    match profile.kind {
+        RemoteTargetKind::Ssh => {
+            if profile.host.trim().is_empty() {
+                return Err("远程服务器地址不得为空".into());
+            }
+            if profile.port == 0 {
+                return Err("远程 SSH 端口不得为 0".into());
+            }
+        }
+        RemoteTargetKind::Wsl => {
+            if profile
+                .distribution
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err("WSL 发行版不得为空".into());
+            }
+        }
     }
     if profile.username.trim().is_empty() {
-        return Err("远程服务器用户名不得为空".into());
-    }
-    if profile.port == 0 {
-        return Err("远程 SSH 端口不得为 0".into());
+        return Err("远程目标用户名不得为空".into());
     }
     if profile.helper_path.trim().is_empty() {
         return Err("Helper 路径不得为空".into());
@@ -205,8 +220,10 @@ mod tests {
         RemoteHostProfile {
             id: id.to_string(),
             name: "测试服务器".to_string(),
+            kind: super::super::types::RemoteTargetKind::Ssh,
             host: "192.168.1.100".to_string(),
             port: 22,
+            distribution: None,
             username: "testuser".to_string(),
             auth_method: RemoteAuthMethod::SshAgent,
             helper_path: "~/.csswitch/bin/csswitch-helper".to_string(),
@@ -250,6 +267,28 @@ mod tests {
         assert_eq!(loaded.len(), 0);
 
         let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_validation_accepts_wsl_without_host_or_port() {
+        let mut p = sample_profile("wsl-1");
+        p.kind = RemoteTargetKind::Wsl;
+        p.name = "Ubuntu".to_string();
+        p.host = String::new();
+        p.port = 0;
+        p.distribution = Some("Ubuntu".to_string());
+        p.username = "zhawei".to_string();
+        validate_profile(&p).unwrap();
+    }
+
+    #[test]
+    fn test_validation_rejects_wsl_without_distribution() {
+        let mut p = sample_profile("wsl-2");
+        p.kind = RemoteTargetKind::Wsl;
+        p.host = String::new();
+        p.port = 0;
+        p.distribution = None;
+        assert!(validate_profile(&p).is_err());
     }
 
     #[test]

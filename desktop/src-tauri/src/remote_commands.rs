@@ -13,7 +13,7 @@
 //! 4. 便利操作 — 一键开始、日志查看、诊断
 
 use crate::remote::{
-    self, RemoteAuthMethod, RemoteHealth, RemoteHostProfile, REQUIRED_CAPABILITIES,
+    self, RemoteAuthMethod, RemoteHealth, RemoteHostProfile, RemoteTargetKind, REQUIRED_CAPABILITIES,
 };
 use crate::{config, templates};
 use serde_json::{json, Value};
@@ -105,6 +105,11 @@ pub fn remote_validate_profile(profile: RemoteHostProfile) -> Result<bool, Strin
     remote::validate_profile(&profile).map(|_| true)
 }
 
+#[tauri::command]
+pub fn remote_list_wsl_distributions() -> Result<Vec<remote::wsl::WslDistribution>, String> {
+    remote::wsl::list_wsl_distributions().map_err(|e| e.message)
+}
+
 /// 保存远程登录信息到系统安全存储。不会写入 remote-hosts.json。
 #[tauri::command]
 pub fn remote_save_login_secret(
@@ -174,7 +179,7 @@ pub fn remote_check_health(profile: RemoteHostProfile) -> Result<RemoteHealth, S
         .as_secs() as i64;
 
     let status_result =
-        remote::ssh::run_helper_json_with_retry::<Value>(&profile, &["status".to_string()]);
+        remote::transport::run_helper_json_with_retry::<Value>(&profile, &["status".to_string()]);
     let health = health_from_status_result(status_result, now);
 
     // P1-8 修复：更新缓存（带上限保护）
@@ -190,7 +195,7 @@ fn remote_check_health_uncached(profile: &RemoteHostProfile) -> RemoteHealth {
         .as_secs() as i64;
 
     let status_result =
-        remote::ssh::run_helper_json_with_retry::<Value>(profile, &["status".to_string()]);
+        remote::transport::run_helper_json_with_retry::<Value>(profile, &["status".to_string()]);
     health_from_status_result(status_result, now)
 }
 
@@ -226,7 +231,7 @@ fn helper_ready_for_profile(health: &RemoteHealth) -> bool {
 }
 
 fn install_helper_from_github(profile: &RemoteHostProfile) -> Result<(), String> {
-    remote::ssh::run_helper_install(profile)
+    remote::transport::run_helper_install(profile)
         .map(|_| ())
         .map_err(|e| format!("GitHub Release 安装失败：{}", e.message))
 }
@@ -265,7 +270,7 @@ fn install_helper_from_bundle(
         .ok_or_else(|| format!("安装包内没有适用于 linux/{arch} 的 Helper 资源"))?;
     let bytes =
         fs::read(&path).map_err(|e| format!("读取内置 Helper 失败（{}）：{e}", path.display()))?;
-    remote::ssh::install_helper_from_stdin(profile, &bytes)
+    remote::transport::install_helper_from_stdin(profile, &bytes)
         .map(|_| ())
         .map_err(|e| e.message)
 }
@@ -293,8 +298,8 @@ pub fn remote_prepare_helper(
         return Ok(initial);
     }
 
-    let (os, arch) = remote::ssh::detect_remote_platform(&profile)
-        .map_err(|e| format!("SSH 连接失败：{}", e.message))?;
+    let (os, arch) = remote::transport::detect_remote_platform(&profile)
+        .map_err(|e| format!("连接目标失败：{}", e.message))?;
     if os != "linux" {
         return Err(format!(
             "远程 Helper 目前仅支持 Linux，当前服务器是 {os}/{arch}。"
@@ -330,7 +335,7 @@ pub fn remote_prepare_helper(
 /// 读取远程服务器上的配置。
 #[tauri::command]
 pub fn remote_get_config(profile: RemoteHostProfile) -> Result<Value, String> {
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["config".to_string(), "get".to_string()],
     )
@@ -340,7 +345,7 @@ pub fn remote_get_config(profile: RemoteHostProfile) -> Result<Value, String> {
 /// 写入远程配置。
 #[tauri::command]
 pub fn remote_set_config(profile: RemoteHostProfile, config_json: String) -> Result<(), String> {
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["config".to_string(), "set".to_string(), config_json],
     )
@@ -356,7 +361,7 @@ pub fn remote_save_provider_key(
     provider: String,
     key: String,
 ) -> Result<String, String> {
-    let result: Value = remote::ssh::run_helper_json_with_retry::<Value>(
+    let result: Value = remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["config".to_string(), "save-key".to_string(), provider, key],
     )
@@ -432,19 +437,19 @@ pub fn remote_start_proxy(
     let (remote_cfg, adapter) = remote_active_config_for_start(&provider, port, None, &secret)?;
     let config_json = serde_json::to_string(&remote_cfg).map_err(|e| e.to_string())?;
 
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["config".to_string(), "set".to_string(), config_json],
     )
     .map_err(|e| format!("同步当前 Profile 到服务器失败：{}", e.message))?;
 
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["proxy".to_string(), "stop".to_string()],
     )
     .map_err(|e| format!("停止旧远程代理失败：{}", e.message))?;
 
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &[
             "proxy".to_string(),
@@ -460,7 +465,7 @@ pub fn remote_start_proxy(
 /// 停止远程代理。
 #[tauri::command]
 pub fn remote_stop_proxy(profile: RemoteHostProfile) -> Result<(), String> {
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["proxy".to_string(), "stop".to_string()],
     )
@@ -471,7 +476,7 @@ pub fn remote_stop_proxy(profile: RemoteHostProfile) -> Result<(), String> {
 /// 查询远程代理状态。
 #[tauri::command]
 pub fn remote_proxy_status(profile: RemoteHostProfile) -> Result<Value, String> {
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["proxy".to_string(), "status".to_string()],
     )
@@ -485,7 +490,7 @@ pub fn remote_verify_key(
     port: u16,
     secret: String,
 ) -> Result<Value, String> {
-    remote::ssh::run_helper_json_slow::<Value>(
+    remote::transport::run_helper_json_slow::<Value>(
         &profile,
         &["verify".to_string(), port.to_string(), secret],
     )
@@ -501,7 +506,7 @@ pub fn remote_verify_key(
 #[tauri::command]
 pub fn remote_status(profile: RemoteHostProfile) -> Result<Value, String> {
     let status: Value =
-        remote::ssh::run_helper_json_with_retry::<Value>(&profile, &["status".to_string()])
+        remote::transport::run_helper_json_with_retry::<Value>(&profile, &["status".to_string()])
             .map_err(|e| e.message)?;
 
     let proxy_running = status["proxy_running"].as_bool().unwrap_or(false);
@@ -526,17 +531,20 @@ pub fn remote_logs(
     if let Some(n) = lines {
         args.push(n.to_string());
     }
-    remote::ssh::run_helper_json_with_retry::<Value>(&profile, &args).map_err(|e| e.message)
+    remote::transport::run_helper_json_with_retry::<Value>(&profile, &args).map_err(|e| e.message)
 }
 
 /// 远程诊断。
 #[tauri::command]
 pub fn remote_doctor(profile: RemoteHostProfile) -> Result<Value, String> {
-    remote::ssh::run_helper_json_with_retry::<Value>(&profile, &["doctor".to_string()])
+    remote::transport::run_helper_json_with_retry::<Value>(&profile, &["doctor".to_string()])
         .map_err(|e| e.message)
 }
 
 fn remote_tunnel_hint(profile: &RemoteHostProfile, sandbox_port: u16) -> String {
+    if matches!(profile.kind, RemoteTargetKind::Wsl) {
+        return "本机 WSL 目标无需 SSH 隧道；直接打开本机地址即可。".to_string();
+    }
     let mut parts = vec!["ssh".to_string()];
     if let RemoteAuthMethod::KeyFile { path, .. } = &profile.auth_method {
         parts.push("-i".to_string());
@@ -575,25 +583,25 @@ pub fn remote_one_click(
         remote_active_config_for_start(&provider, proxy_port, Some(sandbox_port), &secret)?;
     let config_json = serde_json::to_string(&remote_cfg).map_err(|e| e.to_string())?;
 
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["config".to_string(), "set".to_string(), config_json],
     )
     .map_err(|e| format!("同步当前 Profile 到服务器失败：{}", e.message))?;
 
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["proxy".to_string(), "stop".to_string()],
     )
     .map_err(|e| format!("停止旧远程代理失败：{}", e.message))?;
 
-    remote::ssh::run_helper_json_with_retry::<Value>(
+    remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &["sandbox".to_string(), "stop".to_string()],
     )
     .map_err(|e| format!("停止旧远程沙箱失败：{}", e.message))?;
 
-    let proxy_result = remote::ssh::run_helper_json_with_retry::<Value>(
+    let proxy_result = remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &[
             "proxy".to_string(),
@@ -606,7 +614,7 @@ pub fn remote_one_click(
     .map_err(|e| format!("启动远程代理失败：{}", e.message))?;
 
     let proxy_url = format!("http://127.0.0.1:{proxy_port}/{secret}");
-    let sandbox_result = remote::ssh::run_helper_json_with_retry::<Value>(
+    let sandbox_result = remote::transport::run_helper_json_with_retry::<Value>(
         &profile,
         &[
             "sandbox".to_string(),
@@ -622,13 +630,19 @@ pub fn remote_one_click(
         .map(String::from)
         .unwrap_or_else(|| format!("http://127.0.0.1:{sandbox_port}"));
 
+    let remote_url = if matches!(profile.kind, RemoteTargetKind::Wsl) {
+        local_url.clone()
+    } else {
+        format!("http://{}:{sandbox_port}", profile.host)
+    };
+
     Ok(json!({
         "ok": true,
         "proxy_port": proxy_port,
         "sandbox_port": sandbox_port,
         "proxy_url": proxy_url,
         "local_url": local_url,
-        "remote_url": format!("http://{}:{sandbox_port}", profile.host),
+        "remote_url": remote_url,
         "tunnel_hint": remote_tunnel_hint(&profile, sandbox_port),
         "proxy": proxy_result,
         "sandbox": sandbox_result,
@@ -672,7 +686,7 @@ fn health_from_status_result(
             proxy_running: false,
             sandbox_running: false,
             last_error: Some(format!(
-                "无法通过 SSH 连接到服务器。请检查地址、端口和认证配置：{}",
+                "无法连接到目标。请检查连接配置：{}",
                 e.message
             )),
             last_check: now,

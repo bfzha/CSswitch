@@ -14,6 +14,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_remote_target_kind() -> RemoteTargetKind {
+    RemoteTargetKind::Ssh
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,8 +47,30 @@ mod tests {
         let profile: RemoteHostProfile = serde_json::from_str(raw).unwrap();
 
         assert!(matches!(profile.auth_method, RemoteAuthMethod::SshAgent));
+        assert!(matches!(profile.kind, RemoteTargetKind::Ssh));
+        assert_eq!(profile.port, 22);
         assert!(!profile.ssh_options.legacy_compat);
         assert!(profile.ssh_options.extra_args.is_empty());
+    }
+
+    #[test]
+    fn wsl_profile_deserializes() {
+        let raw = r#"{
+            "id":"w1",
+            "name":"Ubuntu",
+            "kind":"wsl",
+            "distribution":"Ubuntu",
+            "username":"zhawei",
+            "authMethod":{"type":"recommended"},
+            "helperPath":"~/.csswitch/bin/csswitch-helper"
+        }"#;
+
+        let profile: RemoteHostProfile = serde_json::from_str(raw).unwrap();
+
+        assert!(matches!(profile.kind, RemoteTargetKind::Wsl));
+        assert_eq!(profile.distribution.as_deref(), Some("Ubuntu"));
+        assert_eq!(profile.username, "zhawei");
+        assert_eq!(profile.port, 22);
     }
 
     #[test]
@@ -127,22 +157,37 @@ pub struct RemoteSshAdvancedOptions {
     pub extra_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteTargetKind {
+    Ssh,
+    Wsl,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteHostProfile {
     /// 唯一标识符（UUID v4）。
     pub id: String,
-    /// 用户友好名称，如 "实验室服务器"。
+    /// 用户友好名称，如 "实验室服务器" 或 "Ubuntu"。
     pub name: String,
-    /// 服务器 IP 地址或域名。
+    /// 连接目标类型：SSH 服务器或本机 WSL。
+    #[serde(default = "default_remote_target_kind")]
+    pub kind: RemoteTargetKind,
+    /// 服务器 IP 地址或域名。WSL 目标不使用。
+    #[serde(default)]
     pub host: String,
-    /// SSH 端口，默认 22。
+    /// SSH 端口，默认 22。WSL 目标不使用。
+    #[serde(default = "default_ssh_port")]
     pub port: u16,
-    /// SSH 登录用户名。
+    /// WSL 发行版名称，如 Ubuntu。仅 WSL 目标使用。
+    #[serde(default)]
+    pub distribution: Option<String>,
+    /// SSH 登录用户名或 WSL Linux 用户。
     pub username: String,
-    /// SSH 认证方式。
+    /// 认证方式。WSL 目标复用该配置，用于后续凭据/交互提示。
     pub auth_method: RemoteAuthMethod,
-    /// 远程 Helper 二进制路径，通常为 `~/.csswitch/bin/csswitch-helper`。
+    /// 远程/WSL Helper 二进制路径，通常为 `~/.csswitch/bin/csswitch-helper`。
     pub helper_path: String,
     /// 最近一次成功连接的时间戳（Unix 秒），用于 UI 排序与提示。
     #[serde(default)]
@@ -158,8 +203,10 @@ impl std::fmt::Debug for RemoteHostProfile {
         f.debug_struct("RemoteHostProfile")
             .field("id", &self.id)
             .field("name", &self.name)
+            .field("kind", &self.kind)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("distribution", &self.distribution)
             .field("username", &self.username)
             .field("auth_method", &self.auth_method)
             .field("helper_path", &self.helper_path)

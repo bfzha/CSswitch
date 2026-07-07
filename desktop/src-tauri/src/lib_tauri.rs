@@ -1445,6 +1445,7 @@ pub fn run() {
             remote_commands::remote_save_profile,
             remote_commands::remote_delete_profile,
             remote_commands::remote_validate_profile,
+            remote_commands::remote_list_wsl_distributions,
             remote_commands::remote_save_login_secret,
             remote_commands::remote_delete_login_secret,
             remote_commands::remote_auth_prompt_respond,

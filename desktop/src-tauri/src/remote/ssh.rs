@@ -29,7 +29,7 @@ use super::types::{RemoteAuthMethod, RemoteError, RemoteHostProfile};
 const NO_WINDOW: u32 = 0x08000000;
 
 /// 创建隐藏窗口的 Command（Windows 上不弹 cmd 窗口）
-fn hide_cmd(mut cmd: Command) -> Command {
+pub(crate) fn hide_cmd(mut cmd: Command) -> Command {
     #[cfg(windows)]
     {
         cmd.creation_flags(NO_WINDOW);
@@ -40,11 +40,11 @@ fn hide_cmd(mut cmd: Command) -> Command {
 /// SSH 超时秒数（ConnectTimeout）。
 const SSH_TIMEOUT_SECS: u64 = 10;
 /// Helper 命令执行超时（适用于大多数操作）。
-const DEFAULT_CMD_TIMEOUT_SECS: u64 = 30;
+pub(crate) const DEFAULT_CMD_TIMEOUT_SECS: u64 = 30;
 /// 安装等慢速操作的超时。
-const SLOW_CMD_TIMEOUT_SECS: u64 = 120;
+pub(crate) const SLOW_CMD_TIMEOUT_SECS: u64 = 120;
 /// 默认重试次数。
-const DEFAULT_RETRIES: u32 = 3;
+pub(crate) const DEFAULT_RETRIES: u32 = 3;
 /// Helper 发布的 GitHub 仓库（可通过环境变量覆盖）。
 const HELPER_RELEASE_REPO: &str = "SuperJJ007/CSswitch";
 const HELPER_RELEASE_REPO_ENV: &str = "CSSWITCH_HELPER_RELEASE_REPO";
@@ -775,7 +775,7 @@ fn run_ssh_command(
     })
 }
 
-fn wait_with_timeout(
+pub(crate) fn wait_with_timeout(
     mut child: std::process::Child,
     timeout: Duration,
 ) -> std::io::Result<Option<Output>> {
@@ -830,7 +830,7 @@ fn wait_with_timeout_legacy(
 }
 
 /// 解析 helper 的 `{"ok":true,"data":...}` JSON 响应。
-fn parse_helper_response<T: DeserializeOwned>(stdout: &str) -> Result<T, RemoteError> {
+pub(crate) fn parse_helper_response<T: DeserializeOwned>(stdout: &str) -> Result<T, RemoteError> {
     // 取最后一行非空内容（忽略 shell 登录 banner 等噪声）
     let json_line = stdout
         .lines()
@@ -1078,7 +1078,7 @@ fn is_recoverable_error(error: &RemoteError) -> bool {
 /// 安全的 shell 引号转义。
 /// 如果参数只包含安全字符（字母数字 + `-_./:`），不添加引号；
 /// 否则用单引号包裹并转义内部单引号。
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
     }
@@ -1104,8 +1104,10 @@ mod tests {
         RemoteHostProfile {
             id: "test".to_string(),
             name: "Test".to_string(),
+            kind: super::super::types::RemoteTargetKind::Ssh,
             host: "example.com".to_string(),
             port: 22,
+            distribution: None,
             username: "testuser".to_string(),
             auth_method: RemoteAuthMethod::SshAgent,
             helper_path: "/usr/local/bin/csswitch-helper".to_string(),

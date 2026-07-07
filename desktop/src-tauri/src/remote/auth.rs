@@ -227,8 +227,10 @@ mod tests {
         RemoteHostProfile {
             id: "profile-1".to_string(),
             name: "Test".to_string(),
+            kind: super::super::types::RemoteTargetKind::Ssh,
             host: "example.com".to_string(),
             port: 22,
+            distribution: None,
             username: "ubuntu".to_string(),
             auth_method,
             helper_path: "/usr/local/bin/csswitch-helper".to_string(),

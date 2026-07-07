@@ -120,6 +120,11 @@ function mockInvoke(cmd, args) {
       return Promise.resolve("0.0.0-preview");
     case "remote_list_profiles":
       return Promise.resolve(mockStore.remoteProfiles.map((p) => ({ ...p })));
+    case "remote_list_wsl_distributions":
+      return Promise.resolve([
+        { name: "Ubuntu", state: "Running", version: 2, isDefault: true },
+        { name: "Debian", state: "Stopped", version: 2, isDefault: false },
+      ]);
     case "remote_save_profile": {
       const p = args.profile;
       const i = mockStore.remoteProfiles.findIndex((x) => x.id === p.id);
@@ -167,6 +172,7 @@ let mode = "proxy";
 let target = "local";
 let currentProfile = null;
 let remoteProfiles = [];
+let wslDistributions = [];
 let statusTimer = null;
 let editingConnId = null;
 let editingMetaId = null;
@@ -757,27 +763,46 @@ async function switchTarget(nextTarget) {
   });
   if (target === "remote") {
     await loadRemoteProfiles();
-    setMsg("已切换到远程服务器。");
+    setMsg("已切换到远程 / WSL。");
   } else {
     setMsg("已切换到本地模式。");
   }
   await refreshStatus();
 }
 
+function remoteProfileKind(profile) {
+  return profile && profile.kind === "wsl" ? "wsl" : "ssh";
+}
+
+function remoteProfileDetail(profile) {
+  if (remoteProfileKind(profile) === "wsl") {
+    return "WSL · " + escapeHtml(profile.username || "?") + "@" + escapeHtml(profile.distribution || profile.name || "?");
+  }
+  return "SSH · " + escapeHtml(profile.username || "?") + "@" + escapeHtml(profile.host || "?") + ":" + escapeHtml(profile.port || 22);
+}
+
+function remoteProfileOptionLabel(profile) {
+  const suffix = remoteProfileKind(profile) === "wsl"
+    ? "WSL " + (profile.distribution || "")
+    : (profile.username || "?") + "@" + (profile.host || "?") + ":" + (profile.port || 22);
+  return profile.name + " (" + suffix + ")";
+}
+
 async function loadRemoteProfiles() {
   try {
     remoteProfiles = await call("remote_list_profiles");
-    els.profileSelect.innerHTML = '<option value="">-- 选择服务器 --</option>' + remoteProfiles.map((p) =>
-      '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + " (" + escapeHtml(p.username) + "@" + escapeHtml(p.host) + ":" + escapeHtml(p.port) + ")</option>"
+    els.profileSelect.innerHTML = '<option value="">-- 选择目标 --</option>' + remoteProfiles.map((p) =>
+      '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(remoteProfileOptionLabel(p)) + "</option>"
     ).join("");
     if (currentProfile && remoteProfiles.some((p) => p.id === currentProfile.id)) {
       els.profileSelect.value = currentProfile.id;
+      currentProfile = remoteProfiles.find((p) => p.id === currentProfile.id) || currentProfile;
     } else {
       currentProfile = null;
     }
     updateRemoteHealthUI();
   } catch (e) {
-    setMsg("加载服务器失败：" + e, "err");
+    setMsg("加载远程 / WSL 目标失败：" + e, "err");
   }
 }
 
@@ -795,7 +820,7 @@ function updateRemoteHealthUI() {
     return;
   }
   els.remoteHealthDot.className = "lt a";
-  els.remoteHealthText.textContent = "已选：" + currentProfile.name;
+  els.remoteHealthText.textContent = "已选：" + currentProfile.name + " · " + (remoteProfileKind(currentProfile) === "wsl" ? "WSL" : "SSH");
 }
 
 async function checkRemoteHealth() {
@@ -827,14 +852,14 @@ async function openProfileModal() {
     ? remoteProfiles.map((p) => (
       '<div class="profile-item">' +
         '<div><div class="pi-name">' + escapeHtml(p.name) + '</div>' +
-        '<div class="pi-detail">' + escapeHtml(p.username) + "@" + escapeHtml(p.host) + ":" + escapeHtml(p.port) + "</div></div>" +
+        '<div class="pi-detail">' + remoteProfileDetail(p) + "</div></div>" +
         '<div class="pi-actions">' +
           '<span class="pi-act" data-action="edit" data-id="' + escapeHtml(p.id) + '">编辑</span>' +
           '<span class="pi-act del" data-action="delete" data-id="' + escapeHtml(p.id) + '">删除</span>' +
         "</div>" +
       "</div>"
     )).join("")
-    : '<div class="hint">暂无服务器。点击「+ 添加」。</div>';
+    : '<div class="hint">暂无远程 / WSL 目标。点击「+ 添加」。</div>';
   els.profileModal.style.display = "flex";
 }
 
@@ -842,13 +867,67 @@ function closeProfileModal() {
   els.profileModal.style.display = "none";
 }
 
-function openProfileEdit(id) {
+async function scanWslDistributions() {
+  els.scanWslBtn.disabled = true;
+  els.wslDistroHint.textContent = "正在扫描 WSL 发行版…";
+  try {
+    wslDistributions = await call("remote_list_wsl_distributions");
+    renderWslDistributionOptions(els.editProfileDistribution.value);
+    els.wslDistroHint.textContent = wslDistributions.length
+      ? "已找到 " + wslDistributions.length + " 个发行版。"
+      : "未找到发行版，请先安装 WSL 发行版。";
+  } catch (e) {
+    els.wslDistroHint.textContent = "扫描失败：" + e;
+  } finally {
+    els.scanWslBtn.disabled = false;
+  }
+}
+
+function renderWslDistributionOptions(selected) {
+  const options = wslDistributions.map((d) => {
+    const label = d.name + (d.isDefault ? " · 默认" : "") + (d.state ? " · " + d.state : "");
+    return '<option value="' + escapeHtml(d.name) + '">' + escapeHtml(label) + "</option>";
+  }).join("");
+  els.editProfileDistribution.innerHTML = '<option value="">-- 选择发行版 --</option>' + options;
+  if (selected && !wslDistributions.some((d) => d.name === selected)) {
+    els.editProfileDistribution.innerHTML += '<option value="' + escapeHtml(selected) + '">' + escapeHtml(selected + " · 未扫描到") + "</option>";
+  }
+  els.editProfileDistribution.value = selected || "";
+}
+
+function currentEditProfileKind() {
+  return els.profileEditModal.dataset.kind === "wsl" ? "wsl" : "ssh";
+}
+
+function setProfileEditKind(kind) {
+  const nextKind = kind === "wsl" ? "wsl" : "ssh";
+  els.profileEditModal.dataset.kind = nextKind;
+  els.editProfileKindSeg.querySelectorAll(".seg-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.kind === nextKind);
+  });
+  const isWsl = nextKind === "wsl";
+  els.wslDistroGroup.style.display = isWsl ? "" : "none";
+  els.sshHostGroup.style.display = isWsl ? "none" : "";
+  els.sshPortGroup.style.display = isWsl ? "none" : "";
+  els.editProfileNameLabel.textContent = isWsl ? "名称（可选，默认使用发行版名）" : "名称";
+  els.editProfileName.placeholder = isWsl ? "Ubuntu" : "我的服务器";
+  els.editProfileUsername.placeholder = isWsl ? "WSL Linux 用户，如 zhawei" : "root";
+  els.editProfileKindHint.textContent = isWsl
+    ? "本机 WSL 通过 wsl.exe 进入 Linux，不需要服务器地址和 SSH 端口。"
+    : "SSH 连接远程 Linux 服务器，认证方式复用密码 / 密钥设置。";
+}
+
+async function openProfileEdit(id) {
   const p = id ? remoteProfiles.find((x) => x.id === id) : null;
+  const kind = remoteProfileKind(p);
   els.profileEditModal.dataset.editId = id || "";
-  els.profileEditTitle.textContent = p ? "编辑服务器" : "添加服务器";
+  els.profileEditTitle.textContent = p ? "编辑目标" : "添加目标";
+  setProfileEditKind(kind);
   els.editProfileName.value = p ? p.name : "";
   els.editProfileHost.value = p ? p.host : "";
   els.editProfilePort.value = p ? p.port : 22;
+  els.editProfileDistribution.value = p && p.distribution ? p.distribution : "";
+  renderWslDistributionOptions(els.editProfileDistribution.value);
   els.editProfileUsername.value = p ? p.username : "";
   const auth = p && p.authMethod ? p.authMethod : { type: "recommended" };
   els.editProfileAuth.value = authSelectValue(auth);
@@ -860,6 +939,7 @@ function openProfileEdit(id) {
   els.profileEditMsg.textContent = "";
   toggleAuthFields();
   els.profileEditModal.style.display = "flex";
+  if (kind === "wsl" && !wslDistributions.length) await scanWslDistributions();
 }
 
 function closeProfileEdit() {
@@ -1079,39 +1159,55 @@ function newRemoteId() {
   return globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : "r-" + Date.now().toString(16);
 }
 
+function buildRemoteProfileFromForm(profileId, nameFallback) {
+  const kind = currentEditProfileKind();
+  const distribution = els.editProfileDistribution.value.trim();
+  const username = els.editProfileUsername.value.trim();
+  const host = kind === "wsl" ? "" : els.editProfileHost.value.trim();
+  const port = kind === "wsl" ? 0 : (parseInt(els.editProfilePort.value, 10) || 22);
+  const name = els.editProfileName.value.trim() || nameFallback || distribution || host || "未命名";
+  return {
+    id: profileId,
+    name,
+    kind,
+    host,
+    port,
+    distribution: kind === "wsl" ? distribution : null,
+    username,
+    authMethod: buildAuthMethodFromForm(),
+    helperPath: els.editProfileHelperPath.value.trim() || "~/.csswitch/bin/csswitch-helper",
+  };
+}
+
+function validateRemoteProfileForm(profile) {
+  if (!profile.username) throw new Error("请填写用户名。");
+  if (profile.kind === "wsl") {
+    if (!profile.distribution) throw new Error("请选择 WSL 发行版。");
+    return;
+  }
+  if (!profile.host) throw new Error("服务器地址和用户名不能为空。");
+}
+
 async function saveProfile() {
   const editId = els.profileEditModal.dataset.editId;
   const profileId = editId || newRemoteId();
-  let authMethod;
+  let profile;
   let loginSecret;
   try {
-    authMethod = buildAuthMethodFromForm();
-    loginSecret = passwordSecretFromForm(passwordRequiredForCurrentProfile(authMethod));
+    profile = buildRemoteProfileFromForm(profileId);
+    loginSecret = passwordSecretFromForm(passwordRequiredForCurrentProfile(profile.authMethod));
+    validateRemoteProfileForm(profile);
   } catch (e) {
     els.profileEditMsg.textContent = e.message || String(e);
     els.profileEditMsg.className = "msg err";
     return;
   }
-  const profile = {
-    id: profileId,
-    name: els.editProfileName.value.trim() || "未命名",
-    host: els.editProfileHost.value.trim(),
-    port: parseInt(els.editProfilePort.value, 10) || 22,
-    username: els.editProfileUsername.value.trim(),
-    authMethod,
-    helperPath: els.editProfileHelperPath.value.trim() || "~/.csswitch/bin/csswitch-helper",
-  };
-  if (!profile.host || !profile.username) {
-    els.profileEditMsg.textContent = "服务器地址和用户名不能为空。";
-    els.profileEditMsg.className = "msg err";
-    return;
-  }
   try {
-    els.profileEditMsg.textContent = "正在准备远程 Helper…";
+    els.profileEditMsg.textContent = "正在准备 Helper…";
     els.profileEditMsg.className = "msg";
     const profileForConnection = withTransientPassword(profile, loginSecret);
     await call("remote_prepare_helper", { profile: profileForConnection });
-    await rememberPasswordAfterConnection(profile.id, authMethod, loginSecret);
+    await rememberPasswordAfterConnection(profile.id, profile.authMethod, loginSecret);
     await call("remote_save_profile", { profile: stripTransientPassword(profileForConnection) });
     els.editProfilePassword.value = "";
     closeProfileEdit();
@@ -1125,31 +1221,23 @@ async function saveProfile() {
 
 async function testProfileConnection() {
   const editId = els.profileEditModal.dataset.editId;
-  let authMethod;
+  let profile;
   let loginSecret;
   try {
-    authMethod = buildAuthMethodFromForm();
-    loginSecret = passwordSecretFromForm(passwordRequiredForCurrentProfile(authMethod));
+    profile = buildRemoteProfileFromForm(editId || "_test_", "test");
+    loginSecret = passwordSecretFromForm(passwordRequiredForCurrentProfile(profile.authMethod));
+    validateRemoteProfileForm(profile);
   } catch (e) {
     els.profileEditMsg.textContent = e.message || String(e);
     els.profileEditMsg.className = "msg err";
     return;
   }
-  const profile = {
-    id: editId || "_test_",
-    name: "test",
-    host: els.editProfileHost.value.trim(),
-    port: parseInt(els.editProfilePort.value, 10) || 22,
-    username: els.editProfileUsername.value.trim(),
-    authMethod,
-    helperPath: els.editProfileHelperPath.value.trim() || "~/.csswitch/bin/csswitch-helper",
-  };
   els.testProfileBtn.disabled = true;
-  els.profileEditMsg.textContent = "正在测试连接并准备远程 Helper…";
+  els.profileEditMsg.textContent = "正在测试连接并准备 Helper…";
   try {
     const profileForConnection = withTransientPassword(profile, loginSecret);
     const h = await call("remote_prepare_helper", { profile: profileForConnection });
-    await rememberPasswordAfterConnection(profile.id, authMethod, loginSecret);
+    await rememberPasswordAfterConnection(profile.id, profile.authMethod, loginSecret);
     const ready = h.reachable && h.helperInstalled && h.compatible;
     els.profileEditMsg.textContent = ready ? "连接成功，Helper 已就绪。" : (h.lastError || "连接成功，但 Helper 未就绪");
     els.profileEditMsg.className = ready ? "msg ok" : "msg err";
@@ -1163,7 +1251,7 @@ async function testProfileConnection() {
 
 async function remoteOneClick() {
   if (!currentProfile) {
-    setMsg("请先选择远程服务器。", "err");
+    setMsg("请先选择远程 / WSL 目标。", "err");
     return;
   }
   const active = activeLocalProfile();
@@ -1206,6 +1294,8 @@ function wire() {
     "manageProfilesBtn", "remoteHealthDot", "remoteHealthText", "profileModal", "addProfileBtn",
     "closeProfileModal", "profileEditModal", "profileEditTitle", "editProfileName",
     "editProfileHost", "editProfilePort", "editProfileUsername", "editProfileAuth",
+    "editProfileKindSeg", "editProfileKindHint", "editProfileNameLabel", "sshHostGroup", "sshPortGroup",
+    "wslDistroGroup", "editProfileDistribution", "scanWslBtn", "wslDistroHint",
     "editProfilePassword", "editProfileRememberPassword", "editProfileKeyPath", "editProfileHelperPath", "passwordGroup",
     "keyFileGroup", "testProfileBtn", "saveProfileBtn", "cancelProfileEditBtn", "profileEditMsg", "authPromptModal",
     "authPromptTitle", "authPromptLabel", "authPromptInput", "authPromptRememberRow",
@@ -1276,6 +1366,13 @@ function wire() {
   els.cancelProfileEditBtn.addEventListener("click", closeProfileEdit);
   els.testProfileBtn.addEventListener("click", testProfileConnection);
   els.editProfileAuth.addEventListener("change", toggleAuthFields);
+  els.editProfileKindSeg.addEventListener("click", async (e) => {
+    const button = e.target.closest("[data-kind]");
+    if (!button) return;
+    setProfileEditKind(button.dataset.kind);
+    if (button.dataset.kind === "wsl" && !wslDistributions.length) await scanWslDistributions();
+  });
+  els.scanWslBtn.addEventListener("click", scanWslDistributions);
   els.authPromptSubmitBtn.addEventListener("click", submitAuthPrompt);
   els.authPromptCancelBtn.addEventListener("click", cancelAuthPrompt);
   els.authPromptInput.addEventListener("keydown", (e) => {
