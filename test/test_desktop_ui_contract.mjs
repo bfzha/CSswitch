@@ -549,6 +549,11 @@ test("remote helper carries and installs the managed proxy script", () => {
   assert.match(helperCommands, /BUNDLED_PROXY/);
 });
 
+test("remote helper status advertises the current proxy bundle capability", () => {
+  assert.match(helperCommands, /"proxy-bundle-v2"/);
+  assert.match(remoteCommands, /"proxy-bundle-v2"/);
+});
+
 test("desktop build requires every Python module imported by the managed proxy", () => {
   for (const file of ["csswitch_proxy.py", "dsml_shim.py", "provider_policy.py", "anthropic_compat.py"]) {
     assert.match(tauriBuildRs, new RegExp(`"${file.replace(".", "\\.")}"`));

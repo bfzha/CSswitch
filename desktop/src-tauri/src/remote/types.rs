@@ -375,6 +375,7 @@ pub const REQUIRED_CAPABILITIES: &[&str] = &[
     "logs",   // 日志文件查看
     "doctor", // 诊断命令
     "verify", // Key 有效性验证
+    "proxy-bundle-v2", // 托管代理包含 csswitch_proxy.py 及其 Python 依赖
 ];
 
 /// Helper 可选 capability（sandbox 在无 Science 的服务器上可能不可用）。

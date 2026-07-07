@@ -852,7 +852,7 @@ mod tests {
             "version": env!("CARGO_PKG_VERSION"),
             "platform": "linux",
             "arch": "x86_64",
-            "capabilities": ["proxy", "config", "logs", "doctor", "verify", "sandbox"],
+            "capabilities": ["proxy", "config", "logs", "doctor", "verify", "proxy-bundle-v2", "sandbox"],
             "proxy_running": false,
             "sandbox_running": false
         });
@@ -866,6 +866,23 @@ mod tests {
             Some(env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(health.desktop_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn helper_status_requires_current_proxy_bundle_capability() {
+        let status = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "platform": "linux",
+            "arch": "x86_64",
+            "capabilities": ["proxy", "config", "logs", "doctor", "verify", "sandbox"],
+            "proxy_running": false,
+            "sandbox_running": false
+        });
+
+        let health = parse_health_from_status(&status, 123);
+
+        assert!(!health.compatible);
+        assert!(!helper_ready_for_profile(&health));
     }
 
     #[test]

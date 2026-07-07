@@ -235,7 +235,15 @@ fn proxy_health(port: u16, secret: &str) -> bool {
 /// `status` — 返回 Helper 版本、能力列表、代理/沙箱运行状态。
 /// 无状态实现：通过 TCP 端口探活检测实际运行状态。
 pub fn cmd_status() -> CliEnvelope {
-    let capabilities: Vec<&str> = vec!["proxy", "sandbox", "config", "logs", "doctor", "verify"];
+    let capabilities: Vec<&str> = vec![
+        "proxy",
+        "sandbox",
+        "config",
+        "logs",
+        "doctor",
+        "verify",
+        "proxy-bundle-v2",
+    ];
     // 从配置读端口然后 TCP 探活，不依赖内存中的 PID
     let port = get_configured_port();
     let proxy_running = is_port_open(port);
