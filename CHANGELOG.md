@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+### 新增 Added
+- **远程 / WSL 目标管理**：新增跨平台远程目标配置、WSL 发行版扫描、远程 helper 准备、远程代理 / 沙箱启动停止与日志诊断入口。
+
+### 修复 Fixed
+- **合入最新主线时保留 OpenAI Responses 语义**：远程桌面入口继续为 `openai-custom` / `openai-responses` 注入 `CSSWITCH_OPENAI_*` 环境变量，并保留 live 模型发现路径。
+
 ## [0.3.6] — 2026-07-06
 
 > 主题：**自定义 OpenAI Responses provider 预览支持**。这版新增 OpenAI Responses 兼容端点路径，并针对 DashScope Responses 兼容模式收紧工具调用与输出预算边界。

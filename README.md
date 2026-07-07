@@ -4,7 +4,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-1d1d1f.svg" alt="macOS Apple Silicon">
+  <img src="https://img.shields.io/badge/platform-Windows%20x64%2Farm64%20%7C%20macOS%20arm64-1d1d1f.svg" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Tauri%202-C25A34.svg" alt="Tauri 2">
 </p>
 
@@ -19,7 +19,7 @@ CSSwitch 是一个给 Claude Science 使用的本地模型切换器。它把 Sci
 
 它面向的不只是开发者：你只需要准备 Claude Science、一个第三方 API Key，然后在桌面面板里新建配置、设为当前、点击「一键开始」。
 
-> 当前版本主要支持 macOS Apple Silicon。首次打开未公证的 `.dmg` 应用时，macOS 可能需要你右键选择「打开」。
+> 当前桌面包支持 Windows x64 / arm64 与 macOS Apple Silicon；远程 Linux helper 用于远程服务器模式。macOS 包尚未 Apple 公证，Windows 包暂未代码签名，请只从本仓库 Release 下载。
 
 [下载最新版](../../releases/latest) · [更新日志](./CHANGELOG.md) · [报告问题](https://github.com/SuperJJ007/CSSwitch/issues/new?template=bug_report.yml) · [功能建议](https://github.com/SuperJJ007/CSSwitch/issues/new?template=feature_request.yml)
 
@@ -79,18 +79,17 @@ Claude Science sandbox
 开始之前，请确认你已经安装：
 
 - [Claude Science](https://claude.com)
-- macOS Apple Silicon 设备
+- Windows x64 / arm64 或 macOS Apple Silicon 设备
 - 一个可用的第三方模型 API Key
 - `python3`（当前代理仍需要；后续计划移入 Rust，减少运行时依赖）
 
-1. 从 [GitHub Releases](../../releases/latest) 下载最新的 `CSSwitch_*.dmg`。
-2. 将 CSSwitch 拖入「应用程序」。
-3. 第一次打开如果被 Gatekeeper 拦截，请右键应用并选择「打开」。
-4. 保持顶部模式为「第三方模型」。
-5. 点击「+ 新建」，选择 provider，填写 API Key、模型和必要的 `base_url`。
-6. 点击「创建」，再在配置列表中点击「设为当前」。
-7. 验证通过后点击「一键开始」。
-8. CSSwitch 会启动隔离 Science，并在浏览器中打开入口。
+1. 从 [GitHub Releases](../../releases/latest) 下载对应平台的安装包：Windows 下载 `CSSwitch_*_setup.exe`，macOS 下载 `CSSwitch_*.dmg`。`csswitch-helper-linux-*` 是远程 Linux 服务器模式使用的 helper，不是桌面安装包。
+2. 安装并打开 CSSwitch。macOS 第一次打开如果被 Gatekeeper 拦截，请右键应用并选择「打开」；Windows 首次安装可能触发 SmartScreen。
+3. 保持顶部模式为「第三方模型」。
+4. 点击「+ 新建」，选择 provider，填写 API Key、模型和必要的 `base_url`。
+5. 点击「创建」，再在配置列表中点击「设为当前」。
+6. 验证通过后点击「一键开始」。
+7. CSSwitch 会启动隔离 Science，并在浏览器中打开入口；Windows 可切到远程 / WSL 目标管理 Linux 环境。
 
 如果你有 Claude 订阅，只想正常使用官方 Claude Science，切到「官方 Claude」模式即可。CSSwitch 会停止第三方代理链路，再打开真实 Science。
 
@@ -131,7 +130,7 @@ CSSwitch 不是 Claude 官方服务，也不会让本地生成的启动门票获
 - Anthropic 托管的远程 MCP 服务不可用，例如 `pubmed`、`clinical-trials`、`chembl`、`biorxiv` 等 `*.mcp.claude.com` 服务。
 - 依赖真实 Claude 账号授权的目录连接器、远程插件、云端能力可能会显示 session expired、unavailable 或 skipped。
 - 第三方模型对工具调用、长上下文、thinking、图片和流式输出的兼容程度不同；原生 Anthropic 端点通常比 OpenAI 翻译路径更稳。
-- 当前 macOS 包尚未 Apple 公证，首次启动需要手动放行。
+- 当前 macOS 包尚未 Apple 公证，Windows 包暂未代码签名，首次启动或安装可能需要手动放行。
 - 当前运行时仍依赖 `python3` 启动代理；移到 Rust 单二进制是后续计划。
 
 已知问题和排期见 [docs/known-issues.md](./docs/known-issues.md)。
@@ -152,7 +151,7 @@ README 目前提供：
 遇到问题时，建议先说明：
 
 - CSSwitch 版本
-- macOS 版本与芯片架构
+- 系统版本与芯片架构
 - 使用的 provider 和模型
 - 操作步骤
 - `~/.csswitch/logs/` 中相关日志
