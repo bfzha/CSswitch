@@ -17,11 +17,11 @@
 
 支持windows下控制 wsl/远程服务器 一点启动，记住是安装exe文件
 
-1.选择远程/wsl
-2.点击管理 ，添加对应资源，输入用户/密码（密钥）连接远程   会自动安装helper脚本
-3.添加第三方模型 （自定义中转站模型支持还有bug,遇到警告先跳过，等启动后再测试是否联通，deepseek等官方支持较好）
-4.点击一键启动，成功会有链接和端口转发命令，wsl不用端口转发
-5.点击链接就会访问服务，或者自行粘贴浏览器访问
+1. 选择远程/wsl
+2. 点击管理 ，添加对应资源，输入用户/密码（密钥）连接远程   会自动安装helper脚本
+3. 添加第三方模型 （自定义中转站模型支持还有bug,遇到警告先跳过，等启动后再测试是否联通，deepseek等官方支持较好）
+4. 点击一键启动，成功会有链接和端口转发命令，wsl不用端口转发
+5. 点击链接就会访问服务，或者自行粘贴浏览器访问
 
 <img width="949/2" height="972/2" alt="image" src="https://github.com/user-attachments/assets/826d2b65-0827-4214-a82e-23a1c0e2ad5f" />
 <img width="947/2" height="940/2" alt="image" src="https://github.com/user-attachments/assets/2abc2f2e-0f46-4931-b8fc-6844ce6dd989" />
